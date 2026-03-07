@@ -1420,11 +1420,6 @@ impl CodexClient {
         Ok(request)
     }
 
-    fn print_trace_summary(&self) {
-        println!("\n[Datadog trace]");
-        println!("go/trace/{}\n", self.trace_id);
-    }
-
     fn wait_for_response<T>(&mut self, request_id: RequestId, method: &str) -> Result<T>
     where
         T: DeserializeOwned,
