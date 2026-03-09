@@ -662,7 +662,7 @@ jobs:
             if command -v zstd >/dev/null 2>&1; then
               zstd -T0 -19 "$dest/$base"
             fi
-            # Create .zip for Windows binaries (required by install.ps1)
+            # Create .zip for Windows binaries (required by install.ps1 and hodexctl.ps1)
             if [[ "${{ runner.os }}" == "Windows" ]]; then
               (cd "$dest" && 7z a "${base}.zip" "$base")
             fi
@@ -877,6 +877,11 @@ jobs:
         run: |
           cp scripts/install/install.sh dist/install.sh
           cp scripts/install/install.ps1 dist/install.ps1
+
+      - name: Stage hodexctl scripts
+        run: |
+          cp scripts/hodexctl/hodexctl.sh dist/hodexctl.sh
+          cp scripts/hodexctl/hodexctl.ps1 dist/hodexctl.ps1
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

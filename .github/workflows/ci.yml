@@ -6,10 +6,11 @@ on:
 
 jobs:
   changed:
-    name: Detect installer changes
+    name: Detect installer and hodexctl changes
     runs-on: ubuntu-latest
     outputs:
       installer: ${{ steps.detect.outputs.installer }}
+      hodexctl: ${{ steps.detect.outputs.hodexctl }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -28,20 +29,23 @@ jobs:
             base_sha='${{ github.event.before }}'
             head_sha='${{ github.sha }}'
             if [[ -z "$base_sha" || "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
-              files=("scripts/install.ps1" "scripts/install.sh" "README.md")
+              files=("scripts/install.ps1" "scripts/install.sh" "scripts/hodexctl/hodexctl.ps1" "scripts/hodexctl/hodexctl.sh" "README.md" "docs/install.md")
             else
               mapfile -t files < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
             fi
           fi
 
           installer=false
+          hodexctl=false
           for f in "${files[@]}"; do
             case "$f" in
               .github/workflows/ci.yml|README.md|scripts/install.ps1|scripts/install.sh) installer=true ;;
+              .github/workflows/ci.yml|README.md|docs/install.md|scripts/hodexctl/*) hodexctl=true ;;
             esac
           done
 
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
+          echo "hodexctl=$hodexctl" >> "$GITHUB_OUTPUT"
 
   build-test:
     runs-on: ubuntu-latest
@@ -200,3 +204,181 @@ jobs:
             try { if ($server -and -not $server.HasExited) { $server.Kill() } } catch {}
             if (Test-Path $tempRoot) { Remove-Item -Recurse -Force $tempRoot }
           }
+
+  hodexctl-install-smoke:
+    name: hodexctl-install-smoke (${{ matrix.os }})
+    needs: changed
+    if: ${{ needs.changed.outputs.hodexctl == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Smoke test hodexctl.sh (local server)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp -d)"
+          state_dir="${tmp}/state"
+          command_dir="${tmp}/commands"
+          server_root="${tmp}/server"
+          mkdir -p "${server_root}/latest/download"
+
+          case "$(uname -s):$(uname -m)" in
+            Darwin:arm64)
+              asset_name="codex-aarch64-apple-darwin"
+              ;;
+            Darwin:x86_64)
+              asset_name="codex-x86_64-apple-darwin"
+              ;;
+            Linux:aarch64|Linux:arm64)
+              asset_name="codex-aarch64-unknown-linux-musl-legacy"
+              ;;
+            Linux:x86_64|Linux:amd64)
+              asset_name="codex-x86_64-unknown-linux-musl-legacy"
+              ;;
+            *)
+              echo "Unsupported runner platform: $(uname -s) $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          cat > "${server_root}/latest/download/${asset_name}" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "codex-cli 9.9.9"
+            exit 0
+          fi
+          echo "dummy"
+          EOF
+          chmod +x "${server_root}/latest/download/${asset_name}"
+
+          port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          python3 -m http.server "$port" --bind 127.0.0.1 --directory "$server_root" >/dev/null 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true' EXIT
+
+          for _ in {1..50}; do
+            if curl -fsS "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          HODEX_RELEASE_BASE_URL="http://127.0.0.1:$port" \
+            bash scripts/hodexctl/hodexctl.sh install \
+              --yes \
+              --no-path-update \
+              --state-dir "$state_dir" \
+              --command-dir "$command_dir"
+
+          test -x "${state_dir}/bin/codex"
+          test -x "${state_dir}/libexec/hodexctl.sh"
+          test -x "${command_dir}/hodex"
+          test -x "${command_dir}/hodexctl"
+
+          HODEX_RELEASE_BASE_URL="http://127.0.0.1:$port" \
+            bash scripts/hodexctl/hodexctl.sh uninstall \
+              --state-dir "$state_dir"
+
+          test ! -e "${command_dir}/hodex"
+          test ! -e "${command_dir}/hodexctl"
+          test ! -e "${state_dir}/state.json"
+
+      - name: Smoke test hodexctl.ps1 (local server)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $target = 'x86_64-pc-windows-msvc'
+          $tempRoot = Join-Path $env:RUNNER_TEMP ("hodexctl-smoke-" + [System.Guid]::NewGuid().ToString())
+          $assetsDir = Join-Path $tempRoot 'assets'
+          $releaseDir = Join-Path $assetsDir 'latest\download'
+          $stateDir = Join-Path $tempRoot 'state'
+          $commandDir = Join-Path $tempRoot 'commands'
+
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $commandDir -Force | Out-Null
+
+          $sourceExe = (Get-Command pwsh).Source
+          Copy-Item $sourceExe (Join-Path $releaseDir "codex-$target.exe") -Force
+          Copy-Item $sourceExe (Join-Path $releaseDir "codex-command-runner.exe") -Force
+          Copy-Item $sourceExe (Join-Path $releaseDir "codex-windows-sandbox-setup.exe") -Force
+
+          $zipPath = Join-Path $releaseDir "codex-$target.exe.zip"
+          if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+          Push-Location $releaseDir
+          Compress-Archive -Path @("codex-$target.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe") -DestinationPath $zipPath -Force
+          Pop-Location
+
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", "$assetsDir") -PassThru -NoNewWindow
+          try {
+            for ($i = 0; $i -lt 50; $i++) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing | Out-Null
+                break
+              } catch {
+                Start-Sleep -Milliseconds 100
+              }
+            }
+
+            $env:HODEX_RELEASE_BASE_URL = "http://127.0.0.1:$port"
+            & pwsh -NoProfile -File scripts/hodexctl/hodexctl.ps1 install -Yes -NoPathUpdate -StateDir $stateDir -CommandDir $commandDir
+
+            if (!(Test-Path (Join-Path $stateDir "bin\codex.exe"))) { throw "codex.exe not installed" }
+            if (!(Test-Path (Join-Path $stateDir "bin\codex-command-runner.exe"))) { throw "codex-command-runner.exe not installed" }
+            if (!(Test-Path (Join-Path $stateDir "bin\codex-windows-sandbox-setup.exe"))) { throw "codex-windows-sandbox-setup.exe not installed" }
+            if (!(Test-Path (Join-Path $stateDir "libexec\hodexctl.ps1"))) { throw "hodexctl.ps1 not installed" }
+            if (!(Test-Path (Join-Path $commandDir "hodex.cmd"))) { throw "hodex.cmd not installed" }
+            if (!(Test-Path (Join-Path $commandDir "hodexctl.cmd"))) { throw "hodexctl.cmd not installed" }
+
+            & pwsh -NoProfile -File scripts/hodexctl/hodexctl.ps1 uninstall -StateDir $stateDir
+
+            if (Test-Path (Join-Path $commandDir "hodex.cmd")) { throw "hodex.cmd not removed" }
+            if (Test-Path (Join-Path $commandDir "hodexctl.cmd")) { throw "hodexctl.cmd not removed" }
+            if (Test-Path (Join-Path $stateDir "state.json")) { throw "state.json not removed" }
+            if (Test-Path (Join-Path $stateDir "bin\codex-command-runner.exe")) { throw "codex-command-runner.exe not removed" }
+            if (Test-Path (Join-Path $stateDir "bin\codex-windows-sandbox-setup.exe")) { throw "codex-windows-sandbox-setup.exe not removed" }
+          } finally {
+            try { if ($server -and -not $server.HasExited) { $server.Kill() } } catch {}
+            if (Test-Path $tempRoot) { Remove-Item -Recurse -Force $tempRoot }
+          }
+
+  hodexctl-script-smoke:
+    name: hodexctl-script-smoke (${{ matrix.os }})
+    needs: changed
+    if: ${{ needs.changed.outputs.hodexctl == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run hodexctl.sh smoke
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/hodexctl/hodexctl-smoke.sh
+
+      - name: Run hodexctl.ps1 smoke
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & pwsh -NoProfile -File scripts/hodexctl/hodexctl-smoke.ps1
