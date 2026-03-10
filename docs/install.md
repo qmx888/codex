@@ -2,13 +2,13 @@
 
 ### System requirements
 
-| Requirement                 | Details                                                                                                                                                                                                                                |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Linux (the shell installer prefers `legacy-musl`/`musl` assets when available; `gnu` assets require glibc >= 2.35), Windows 11 **via WSL2** for the core workspace, or Windows PowerShell for `hodexctl` release management |
-| Git (optional, recommended) | 2.23+ for built-in PR helpers                                                                                                                                                                                                          |
-| RAM                         | 4-GB minimum (8-GB recommended)                                                                                                                                                                                                        |
+| Requirement                 | Details                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Operating systems           | macOS 12+, Linux (the shell installer prefers `musl` assets when available; `gnu` assets require glibc >= 2.35), or Windows 11 **via WSL2** |
+| Git (optional, recommended) | 2.23+ for built-in PR helpers                                                                                                               |
+| RAM                         | 4-GB minimum (8-GB recommended)                                                                                                             |
 
-> **Note:** The shell installer prefers `legacy-musl`, then `musl`, then `gnu` Linux assets when available. `gnu` assets require glibc 2.35 or newer.
+> **Note:** The shell installer prefers `musl`, then `gnu` Linux assets when available. `gnu` assets require glibc 2.35 or newer.
 
 ### Hodexctl
 
