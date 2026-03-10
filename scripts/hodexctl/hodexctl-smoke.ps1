@@ -240,14 +240,74 @@ try {
         Assert-Contains -Text $statusViaWrapper -Expected "正式版安装状态: 未安装"
         Write-Host "==> 检查未安装状态输出"
         $statusOutput = (& $runner -NoProfile -File $controllerPath status -StateDir $smokeStateDir 2>&1 | Out-String)
-        Assert-Contains -Text $statusOutput -Expected "正式版安装状态: 未安装"
-        Assert-Contains -Text $statusOutput -Expected ("状态目录: " + $smokeStateDir)
+	        Assert-Contains -Text $statusOutput -Expected "正式版安装状态: 未安装"
+	        Assert-Contains -Text $statusOutput -Expected ("状态目录: " + $smokeStateDir)
 
-        Write-Host "==> 检查 release-only 安装与卸载清理"
-        $assetsDir = Join-Path $tempRoot 'release-assets'
-        $releaseDir = Join-Path $assetsDir 'latest\download'
-        $brokenReleaseDir = Join-Path $tempRoot 'broken-release-assets\latest\download'
-        New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+	        Write-Host "==> 检查 install-hodexctl.ps1 刷新当前会话 PATH"
+	        $installerRepo = "smoke-repo"
+	        $installerAssetsDir = Join-Path $tempRoot 'installer-assets'
+	        $installerControllerDir = Join-Path $installerAssetsDir (Join-Path $installerRepo 'main\scripts\hodexctl')
+	        $installerControllerScript = Join-Path $installerControllerDir 'hodexctl.ps1'
+	        New-Item -ItemType Directory -Path $installerControllerDir -Force | Out-Null
+	        Copy-Item -LiteralPath $controllerPath -Destination $installerControllerScript -Force
+
+	        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+	        $listener.Start()
+	        $installerPort = $listener.LocalEndpoint.Port
+	        $listener.Stop()
+	        $installerServer = Start-Process -FilePath python -ArgumentList @("-m", "http.server", "$installerPort", "--bind", "127.0.0.1", "--directory", "$installerAssetsDir") -PassThru -NoNewWindow
+	        try {
+	            for ($i = 0; $i -lt 50; $i++) {
+	                try {
+	                    Invoke-WebRequest -Uri "http://127.0.0.1:$installerPort/" -UseBasicParsing | Out-Null
+	                    break
+	                } catch {
+	                    Start-Sleep -Milliseconds 100
+	                }
+	            }
+
+	            $installStateDir = Join-Path $tempRoot 'installer-state'
+	            $installCommandDir = Join-Path $tempRoot 'installer-command'
+	            New-Item -ItemType Directory -Path $installStateDir -Force | Out-Null
+	            New-Item -ItemType Directory -Path $installCommandDir -Force | Out-Null
+
+		            $installScriptPath = Join-Path (Split-Path -Parent $scriptDir) 'install-hodexctl.ps1'
+		            $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+		            $originalProcessPath = $env:Path
+		            $originalProgressPreference = $ProgressPreference
+		            try {
+		                $ProgressPreference = "Continue"
+		                $env:HODEXCTL_REPO = $installerRepo
+		                $env:HODEX_CONTROLLER_URL_BASE = "http://127.0.0.1:$installerPort"
+		                $env:HODEX_STATE_DIR = $installStateDir
+		                $env:HODEX_COMMAND_DIR = $installCommandDir
+		                Remove-Item Env:\HODEXCTL_NO_PATH_UPDATE -ErrorAction SilentlyContinue
+
+		                $installerOutput = (& $installScriptPath 2>&1 | Out-String)
+		                Assert-Contains -Text $installerOutput -Expected "当前会话已"
+		                $hodexctlSource = (Get-Command hodexctl -ErrorAction Stop).Source
+		                Assert-Contains -Text $hodexctlSource -Expected $installCommandDir
+		                $statusAfterInstall = (& hodexctl status 2>&1 | Out-String)
+		                Assert-Contains -Text $statusAfterInstall -Expected ("状态目录: " + $installStateDir)
+		                if ($ProgressPreference -ne "Continue") { throw "install-hodexctl.ps1 不应修改 ProgressPreference" }
+		            } finally {
+		                $ProgressPreference = $originalProgressPreference
+		                [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+		                $env:Path = $originalProcessPath
+		                Remove-Item Env:\HODEXCTL_REPO -ErrorAction SilentlyContinue
+		                Remove-Item Env:\HODEX_CONTROLLER_URL_BASE -ErrorAction SilentlyContinue
+		                Remove-Item Env:\HODEX_STATE_DIR -ErrorAction SilentlyContinue
+	                Remove-Item Env:\HODEX_COMMAND_DIR -ErrorAction SilentlyContinue
+	            }
+	        } finally {
+	            try { if ($installerServer -and -not $installerServer.HasExited) { $installerServer.Kill() } } catch {}
+	        }
+
+	        Write-Host "==> 检查 release-only 安装与卸载清理"
+	        $assetsDir = Join-Path $tempRoot 'release-assets'
+	        $releaseDir = Join-Path $assetsDir 'latest\download'
+	        $brokenReleaseDir = Join-Path $tempRoot 'broken-release-assets\latest\download'
+	        New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
         New-Item -ItemType Directory -Path $brokenReleaseDir -Force | Out-Null
         New-Item -ItemType Directory -Path $releaseStateDir -Force | Out-Null
         New-Item -ItemType Directory -Path $releaseCommandDir -Force | Out-Null
@@ -318,10 +378,103 @@ try {
             if (Test-Path (Join-Path $releaseStateDir "bin\codex-command-runner.exe")) { throw "release codex-command-runner.exe 未删除" }
             if (Test-Path (Join-Path $releaseStateDir "bin\codex-windows-sandbox-setup.exe")) { throw "release codex-windows-sandbox-setup.exe 未删除" }
 
-            Write-Host "==> 检查 Windows 缺失 helper 时严格失败"
-            $env:HODEX_RELEASE_BASE_URL = "http://127.0.0.1:$brokenReleasePort"
-            $brokenInstallOutput = (& $runner -NoProfile -File $controllerPath install -Yes -NoPathUpdate -StateDir (Join-Path $tempRoot 'broken-state') -CommandDir (Join-Path $tempRoot 'broken-command') 2>&1 | Out-String)
-            if ($LASTEXITCODE -eq 0) { throw "缺失 helper 的 Windows release 安装不应成功" }
+            Write-Host "==> 检查 Windows repair 可补齐用户 PATH"
+            $repairStateDir = Join-Path $tempRoot 'repair-state'
+            $repairCommandDir = Join-Path $tempRoot 'repair-command'
+            New-Item -ItemType Directory -Path $repairStateDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $repairCommandDir -Force | Out-Null
+            $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            try {
+                $repairInstallOutput = (& $runner -NoProfile -File $controllerPath install -Yes -NoPathUpdate -StateDir $repairStateDir -CommandDir $repairCommandDir 2>&1 | Out-String)
+                Assert-Contains -Text $repairInstallOutput -Expected "安装完成"
+                $repairStatusOutput = (& $runner -NoProfile -File $controllerPath status -StateDir $repairStateDir -CommandDir $repairCommandDir 2>&1 | Out-String)
+                Assert-Contains -Text $repairStatusOutput -Expected "建议执行: hodexctl repair"
+                $repairOutput = (& $runner -NoProfile -File $controllerPath repair -Yes -StateDir $repairStateDir -CommandDir $repairCommandDir 2>&1 | Out-String)
+                Assert-Contains -Text $repairOutput -Expected "repair 已完成。"
+                $updatedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+                if ($updatedUserPath -notlike "*$repairCommandDir*") { throw "repair 未写入用户 PATH" }
+                $repairShellOutput = (& $runner -NoProfile -Command @"
+`$env:Path = [Environment]::GetEnvironmentVariable('Path', 'User')
+`$hodexSource = (Get-Command hodex -ErrorAction Stop).Source
+Write-Output `$hodexSource
+& hodex --version
+"@ 2>&1 | Out-String)
+                Assert-Contains -Text $repairShellOutput -Expected "codex-cli 9.9.9"
+            } finally {
+                [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+            }
+
+            Write-Host "==> 检查 Windows 预存用户 PATH 卸载后不误删"
+            $preexistingStateDir = Join-Path $tempRoot 'preexisting-state'
+            $preexistingCommandDir = Join-Path $tempRoot 'preexisting-command'
+            New-Item -ItemType Directory -Path $preexistingStateDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $preexistingCommandDir -Force | Out-Null
+            $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            $originalProcessPath = $env:Path
+            try {
+                [Environment]::SetEnvironmentVariable("Path", (Add-PathEntry -PathValue $originalUserPath -Entry $preexistingCommandDir), "User")
+                $env:Path = Remove-PathEntry -PathValue $originalProcessPath -Entry $preexistingCommandDir
+                $preexistingInstallOutput = (& $runner -NoProfile -File $controllerPath install -Yes -StateDir $preexistingStateDir -CommandDir $preexistingCommandDir 2>&1 | Out-String)
+                Assert-Contains -Text $preexistingInstallOutput -Expected "安装完成"
+                $preexistingStatusOutput = (& $runner -NoProfile -File $controllerPath status -StateDir $preexistingStateDir -CommandDir $preexistingCommandDir 2>&1 | Out-String)
+                Assert-Contains -Text $preexistingStatusOutput -Expected "PATH 来源: preexisting-user-path"
+                $preexistingUninstallOutput = (& $runner -NoProfile -File $controllerPath uninstall -StateDir $preexistingStateDir 2>&1 | Out-String)
+                Assert-Contains -Text $preexistingUninstallOutput -Expected "已删除正式版二进制、包装器和安装状态。"
+                $userPathAfterUninstall = [Environment]::GetEnvironmentVariable("Path", "User")
+                if ($userPathAfterUninstall -notlike "*$preexistingCommandDir*") { throw "卸载误删了用户原有 PATH 条目" }
+	            } finally {
+	                [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+	                $env:Path = $originalProcessPath
+	            }
+
+	            Write-Host "==> 检查 Windows 旧 state.json 卸载仍会清理用户 PATH"
+	            $legacyStateDir = Join-Path $tempRoot 'legacy-state'
+	            $legacyCommandDir = Join-Path $tempRoot 'legacy-command'
+	            New-Item -ItemType Directory -Path $legacyStateDir -Force | Out-Null
+	            New-Item -ItemType Directory -Path $legacyCommandDir -Force | Out-Null
+	            $legacyControllerPath = Join-Path $legacyStateDir 'libexec\hodexctl.ps1'
+	            New-Item -ItemType Directory -Path (Split-Path -Parent $legacyControllerPath) -Force | Out-Null
+	            Copy-Item -LiteralPath $controllerPath -Destination $legacyControllerPath -Force
+
+	            $legacyStatePayload = [ordered]@{
+	                schema_version    = 2
+	                repo              = 'stellarlinkco/codex'
+	                installed_version = ''
+	                release_tag       = ''
+	                release_name      = ''
+	                asset_name        = ''
+	                binary_path       = ''
+	                controller_path   = $legacyControllerPath
+	                command_dir       = $legacyCommandDir
+	                wrappers_created  = @()
+	                path_update_mode  = 'added'
+	                path_profile      = 'User'
+	                node_setup_choice = ''
+	                installed_at      = '2026-03-09T00:00:00Z'
+	                source_profiles   = [ordered]@{}
+	                active_runtime_aliases = [ordered]@{}
+	            }
+	            ($legacyStatePayload | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $legacyStateDir 'state.json') -Encoding UTF8
+
+	            $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+	            $originalProcessPath = $env:Path
+	            try {
+	                [Environment]::SetEnvironmentVariable("Path", (Add-PathEntry -PathValue $originalUserPath -Entry $legacyCommandDir), "User")
+	                $env:Path = Add-PathEntry -PathValue $originalProcessPath -Entry $legacyCommandDir
+
+	                $legacyUninstallOutput = (& $runner -NoProfile -File $controllerPath uninstall -StateDir $legacyStateDir 2>&1 | Out-String)
+	                Assert-Contains -Text $legacyUninstallOutput -Expected "已卸载 hodexctl 管理器。"
+	                $userPathAfterUninstall = [Environment]::GetEnvironmentVariable("Path", "User")
+	                if ($userPathAfterUninstall -like "*$legacyCommandDir*") { throw "旧 state.json 卸载后仍残留用户 PATH 条目" }
+	            } finally {
+	                [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+	                $env:Path = $originalProcessPath
+	            }
+
+	            Write-Host "==> 检查 Windows 缺失 helper 时严格失败"
+	            $env:HODEX_RELEASE_BASE_URL = "http://127.0.0.1:$brokenReleasePort"
+	            $brokenInstallOutput = (& $runner -NoProfile -File $controllerPath install -Yes -NoPathUpdate -StateDir (Join-Path $tempRoot 'broken-state') -CommandDir (Join-Path $tempRoot 'broken-command') 2>&1 | Out-String)
+	            if ($LASTEXITCODE -eq 0) { throw "缺失 helper 的 Windows release 安装不应成功" }
             Assert-Contains -Text $brokenInstallOutput -Expected "当前 Windows release 资产缺少必需 helper"
         } finally {
             try { if ($releaseServer -and -not $releaseServer.HasExited) { $releaseServer.Kill() } } catch {}

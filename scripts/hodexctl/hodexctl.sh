@@ -79,8 +79,14 @@ STATE_CONTROLLER_PATH=""
 STATE_COMMAND_DIR=""
 STATE_PATH_UPDATE_MODE=""
 STATE_PATH_PROFILE=""
+STATE_PATH_MANAGED_BY_HODEXCTL="false"
+STATE_PATH_DETECTED_SOURCE=""
 STATE_NODE_SETUP_CHOICE=""
 STATE_INSTALLED_AT=""
+PATH_UPDATE_MODE=""
+PATH_PROFILE=""
+PATH_MANAGED_BY_HODEXCTL="false"
+PATH_DETECTED_SOURCE=""
 
 usage() {
   local usage_command standalone_command
@@ -105,6 +111,7 @@ usage() {
   status                 查看当前安装状态
   list                   交互式列出当前平台可下载版本，并支持查看更新日志
   relink                 重新生成 hodex / hodexctl 包装器
+  repair                 修复本地 wrapper / PATH / state 漂移问题
   help                   显示帮助
 
 选项:
@@ -138,6 +145,7 @@ usage() {
   hodexctl source status
   hodexctl source list
   hodexctl relink --command-dir ~/.local/bin
+  hodexctl repair
   hodexctl uninstall
 
 示例（独立下载脚本后直接运行）:
@@ -149,6 +157,7 @@ usage() {
   ${standalone_command} downgrade 1.2.2
   ${standalone_command} source install --git-url https://github.com/stellarlinkco/codex.git --ref main
   ${standalone_command} relink --command-dir ~/.local/bin
+  ${standalone_command} repair
   ${standalone_command} uninstall
 EOF
 }
@@ -398,7 +407,7 @@ parse_args() {
   local original_argc=$#
   while (($# > 0)); do
     case "$1" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help | manager-install)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | repair | help | manager-install)
         positional+=("$1")
         shift
         ;;
@@ -506,7 +515,7 @@ parse_args() {
 
   if ((${#positional[@]} > 0)); then
     case "${positional[0]}" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help | manager-install)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | repair | help | manager-install)
         COMMAND="${positional[0]}"
         positional=("${positional[@]:1}")
         ;;
@@ -542,7 +551,7 @@ parse_args() {
         positional=("${positional[@]:1}")
       fi
       ;;
-    uninstall | status | list | relink | manager-install)
+    uninstall | status | list | relink | repair | manager-install)
       ;;
     help)
       usage
@@ -971,6 +980,24 @@ shell_json_get_top_level_string() {
       sub("^  \"" key "\"[[:space:]]*:[[:space:]]*\"", "", line)
       sub("\",[[:space:]]*,?[[:space:]]*$", "", line)
       print line
+      exit
+    }
+  ' "$json_file"
+}
+
+shell_json_get_top_level_bool() {
+  local json_file="$1"
+  local field="$2"
+  awk -v key="$field" '
+    $0 ~ ("^  \"" key "\"[[:space:]]*:") {
+      line = $0
+      sub("^  \"" key "\"[[:space:]]*:[[:space:]]*", "", line)
+      sub("[[:space:]]*,?[[:space:]]*$", "", line)
+      if (line == "true") {
+        print "true"
+      } else {
+        print "false"
+      }
       exit
     }
   ' "$json_file"
@@ -1460,8 +1487,10 @@ write_state_file() {
   local hodexctl_wrapper="${10}"
   local path_update_mode="${11}"
   local path_profile="${12}"
-  local node_setup_choice="${13}"
-  local installed_at="${14}"
+  local path_managed_by_hodexctl="${13}"
+  local path_detected_source="${14}"
+  local node_setup_choice="${15}"
+  local installed_at="${16}"
 
   mkdir -p "$(dirname "$state_file")"
 
@@ -1480,6 +1509,8 @@ write_state_file() {
       "$hodexctl_wrapper" \
       "$path_update_mode" \
       "$path_profile" \
+      "$path_managed_by_hodexctl" \
+      "$path_detected_source" \
       "$node_setup_choice" \
       "$installed_at" <<'PY'
 import json
@@ -1499,6 +1530,8 @@ import sys
     hodexctl_wrapper,
     path_update_mode,
     path_profile,
+    path_managed_by_hodexctl,
+    path_detected_source,
     node_setup_choice,
     installed_at,
 ) = sys.argv[1:]
@@ -1516,6 +1549,8 @@ payload = {
     "wrappers_created": [hodex_wrapper, hodexctl_wrapper],
     "path_update_mode": path_update_mode,
     "path_profile": path_profile,
+    "path_managed_by_hodexctl": str(path_managed_by_hodexctl).lower() == "true",
+    "path_detected_source": path_detected_source,
     "node_setup_choice": node_setup_choice,
     "installed_at": installed_at,
 }
@@ -1572,6 +1607,8 @@ PY
       printf '  ],\n'
       printf '  "path_update_mode": %s,\n' "$(json_quote "$path_update_mode")"
       printf '  "path_profile": %s,\n' "$(json_quote "$path_profile")"
+      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$path_managed_by_hodexctl" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
+      printf '  "path_detected_source": %s,\n' "$(json_quote "$path_detected_source")"
       printf '  "node_setup_choice": %s,\n' "$(json_quote "$node_setup_choice")"
       printf '  "installed_at": %s,\n' "$(json_quote "$installed_at")"
       printf '  "source_profiles": {},\n'
@@ -1604,6 +1641,8 @@ PY
     --arg hodexctl_wrapper "$hodexctl_wrapper" \
     --arg path_update_mode "$path_update_mode" \
     --arg path_profile "$path_profile" \
+    --arg path_managed_by_hodexctl "$path_managed_by_hodexctl" \
+    --arg path_detected_source "$path_detected_source" \
     --arg node_setup_choice "$node_setup_choice" \
     --arg installed_at "$installed_at" \
     --slurpfile existing "$existing_file" \
@@ -1622,6 +1661,8 @@ PY
         wrappers_created: [$hodex_wrapper, $hodexctl_wrapper],
         path_update_mode: $path_update_mode,
         path_profile: $path_profile,
+        path_managed_by_hodexctl: ($path_managed_by_hodexctl == "true"),
+        path_detected_source: $path_detected_source,
         node_setup_choice: $node_setup_choice,
         installed_at: $installed_at,
         source_profiles: ($existing.source_profiles // {}),
@@ -1662,6 +1703,8 @@ mapping = {
     "STATE_COMMAND_DIR": data.get("command_dir", ""),
     "STATE_PATH_UPDATE_MODE": data.get("path_update_mode", ""),
     "STATE_PATH_PROFILE": data.get("path_profile", ""),
+    "STATE_PATH_MANAGED_BY_HODEXCTL": "true" if data.get("path_managed_by_hodexctl", False) else "false",
+    "STATE_PATH_DETECTED_SOURCE": data.get("path_detected_source", ""),
     "STATE_NODE_SETUP_CHOICE": data.get("node_setup_choice", ""),
     "STATE_INSTALLED_AT": data.get("installed_at", ""),
 }
@@ -1683,6 +1726,8 @@ PY
           "STATE_COMMAND_DIR=" + (.command_dir // "" | @sh),
           "STATE_PATH_UPDATE_MODE=" + (.path_update_mode // "" | @sh),
           "STATE_PATH_PROFILE=" + (.path_profile // "" | @sh),
+          "STATE_PATH_MANAGED_BY_HODEXCTL=" + (if (.path_managed_by_hodexctl // false) then "true" else "false" end | @sh),
+          "STATE_PATH_DETECTED_SOURCE=" + (.path_detected_source // "" | @sh),
           "STATE_NODE_SETUP_CHOICE=" + (.node_setup_choice // "" | @sh),
           "STATE_INSTALLED_AT=" + (.installed_at // "" | @sh)
         ] | .[]
@@ -1700,12 +1745,17 @@ PY
     STATE_COMMAND_DIR="$(shell_json_get_top_level_string "$state_file" "command_dir")"
     STATE_PATH_UPDATE_MODE="$(shell_json_get_top_level_string "$state_file" "path_update_mode")"
     STATE_PATH_PROFILE="$(shell_json_get_top_level_string "$state_file" "path_profile")"
+    STATE_PATH_MANAGED_BY_HODEXCTL="$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")"
+    STATE_PATH_DETECTED_SOURCE="$(shell_json_get_top_level_string "$state_file" "path_detected_source")"
     STATE_NODE_SETUP_CHOICE="$(shell_json_get_top_level_string "$state_file" "node_setup_choice")"
     STATE_INSTALLED_AT="$(shell_json_get_top_level_string "$state_file" "installed_at")"
   fi
 
   if [[ -z "$STATE_CONTROLLER_PATH" ]]; then
     STATE_CONTROLLER_PATH="$STATE_DIR/libexec/hodexctl.sh"
+  fi
+  if [[ -z "$STATE_PATH_MANAGED_BY_HODEXCTL" ]]; then
+    STATE_PATH_MANAGED_BY_HODEXCTL="false"
   fi
 }
 
@@ -2143,15 +2193,17 @@ state_update_runtime_metadata() {
   local controller_path="$3"
   local path_update_mode="$4"
   local path_profile="$5"
+  local path_managed_by_hodexctl="$6"
+  local path_detected_source="$7"
 
   [[ -f "$state_file" ]] || return 0
 
   if [[ "$JSON_BACKEND" == "python3" ]]; then
-    python3 - "$state_file" "$command_dir" "$controller_path" "$path_update_mode" "$path_profile" <<'PY'
+    python3 - "$state_file" "$command_dir" "$controller_path" "$path_update_mode" "$path_profile" "$path_managed_by_hodexctl" "$path_detected_source" <<'PY'
 import json
 import sys
 
-state_file, command_dir, controller_path, path_update_mode, path_profile = sys.argv[1:6]
+state_file, command_dir, controller_path, path_update_mode, path_profile, path_managed_by_hodexctl, path_detected_source = sys.argv[1:8]
 
 with open(state_file, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
@@ -2160,6 +2212,8 @@ payload["command_dir"] = command_dir
 payload["controller_path"] = controller_path
 payload["path_update_mode"] = path_update_mode
 payload["path_profile"] = path_profile
+payload["path_managed_by_hodexctl"] = str(path_managed_by_hodexctl).lower() == "true"
+payload["path_detected_source"] = path_detected_source
 
 with open(state_file, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -2172,11 +2226,15 @@ PY
     --arg command_dir "$command_dir" \
     --arg controller_path "$controller_path" \
     --arg path_update_mode "$path_update_mode" \
-    --arg path_profile "$path_profile" '
+    --arg path_profile "$path_profile" \
+    --arg path_managed_by_hodexctl "$path_managed_by_hodexctl" \
+    --arg path_detected_source "$path_detected_source" '
     .command_dir = $command_dir
     | .controller_path = $controller_path
     | .path_update_mode = $path_update_mode
     | .path_profile = $path_profile
+    | .path_managed_by_hodexctl = ($path_managed_by_hodexctl == "true")
+    | .path_detected_source = $path_detected_source
   ' "$state_file" >"$state_file.tmp.$$"
   mv "$state_file.tmp.$$" "$state_file"
 }
@@ -2300,6 +2358,8 @@ PY
       printf '  "wrappers_created": [],\n'
       printf '  "path_update_mode": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_update_mode")")"
       printf '  "path_profile": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_profile")")"
+      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
+      printf '  "path_detected_source": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_detected_source")")"
       printf '  "node_setup_choice": "",\n'
       printf '  "installed_at": "",\n'
       printf '  "source_profiles": {},\n'
@@ -2464,6 +2524,37 @@ any_path_block_present() {
   return 1
 }
 
+profile_file_has_command_dir_evidence() {
+  local profile_file="$1"
+  local target="$2"
+  [[ -f "$profile_file" ]] || return 1
+
+  if grep -F -- "$target" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ "$target" == "$(normalize_user_path "$HOME/.local/bin")" ]]; then
+    if grep -E '(^|[[:space:]])(\.|source)[[:space:]]+["'"'"']?(\$HOME|~)/\.local/bin/env["'"'"']?' "$profile_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+any_profile_has_command_dir_evidence() {
+  local target="$1"
+  shift
+  local profile_file
+  for profile_file in "$@"; do
+    [[ -n "$profile_file" ]] || continue
+    if profile_file_has_command_dir_evidence "$profile_file" "$target"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 is_path_segment_present() {
   local path_value="$1"
   local target="$2"
@@ -2490,9 +2581,12 @@ write_path_block() {
 update_path_if_needed() {
   PATH_UPDATE_MODE="skipped"
   PATH_PROFILE=""
+  PATH_MANAGED_BY_HODEXCTL="false"
+  PATH_DETECTED_SOURCE=""
 
   if ((NO_PATH_UPDATE)); then
     PATH_UPDATE_MODE="disabled"
+    PATH_DETECTED_SOURCE="disabled"
     return
   fi
 
@@ -2512,15 +2606,29 @@ update_path_if_needed() {
     done
     PATH_PROFILE="$profile_file"
     PATH_UPDATE_MODE="configured"
+    PATH_MANAGED_BY_HODEXCTL="true"
+    PATH_DETECTED_SOURCE="managed-profile-block"
     if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
       export PATH="$COMMAND_DIR:$PATH"
     fi
     return
   fi
 
-  if is_path_segment_present "$PATH" "$COMMAND_DIR"; then
-    PATH_UPDATE_MODE="already"
+  if any_profile_has_command_dir_evidence "$COMMAND_DIR" "${profile_targets[@]-}"; then
+    PATH_PROFILE="$profile_file"
+    PATH_DETECTED_SOURCE="preexisting-profile"
+    if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
+      export PATH="$COMMAND_DIR:$PATH"
+      PATH_UPDATE_MODE="configured"
+    else
+      PATH_UPDATE_MODE="already"
+    fi
     return
+  fi
+
+  PATH_PROFILE="$profile_file"
+  if is_path_segment_present "$PATH" "$COMMAND_DIR"; then
+    PATH_DETECTED_SOURCE="current-process-only"
   fi
 
   local should_update=1
@@ -2543,6 +2651,9 @@ update_path_if_needed() {
 
   if ((should_update)); then
     PATH_UPDATE_MODE="user-skipped"
+    if [[ -z "$PATH_DETECTED_SOURCE" ]]; then
+      PATH_DETECTED_SOURCE="user-skipped"
+    fi
     return
   fi
 
@@ -2554,6 +2665,8 @@ update_path_if_needed() {
   done
   PATH_PROFILE="$profile_file"
   PATH_UPDATE_MODE="added"
+  PATH_MANAGED_BY_HODEXCTL="true"
+  PATH_DETECTED_SOURCE="managed-profile-block"
 
   if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
     export PATH="$COMMAND_DIR:$PATH"
@@ -2580,6 +2693,52 @@ remove_path_blocks_for_targets() {
   while IFS= read -r target; do
     remove_path_block "$target"
   done < <(path_profile_targets "$primary_profile")
+}
+
+profile_file_has_path_block() {
+  local profile_file="$1"
+  [[ -f "$profile_file" ]] || return 1
+  if grep -F "$PATH_BLOCK_START" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  if grep -F "$LEGACY_PATH_BLOCK_START" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+cleanup_path_blocks_for_uninstall() {
+  local primary_profile="$1"
+  local -a candidates=()
+  local target cleaned=0 seen_key="|"
+
+  if [[ -n "$primary_profile" ]]; then
+    candidates+=("$primary_profile")
+  fi
+
+  candidates+=(
+    "$HOME/.zprofile"
+    "$HOME/.zshrc"
+    "$HOME/.bash_profile"
+    "$HOME/.bashrc"
+    "$HOME/.profile"
+  )
+
+  for target in "${candidates[@]-}"; do
+    [[ -n "$target" ]] || continue
+    case "$seen_key" in
+      *"|$target|"*) continue ;;
+      *) seen_key="${seen_key}${target}|" ;;
+    esac
+    if profile_file_has_path_block "$target"; then
+      remove_path_block "$target"
+      cleaned=1
+    fi
+  done
+
+  if ((cleaned)); then
+    log_info "已清理受管 PATH 配置块。"
+  fi
 }
 
 generate_hodex_wrapper() {
@@ -5698,7 +5857,7 @@ perform_source_build() {
 
   sync_runtime_wrappers_from_state "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh"
   update_path_if_needed
-  state_update_runtime_metadata "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh" "$PATH_UPDATE_MODE" "$PATH_PROFILE"
+  state_update_runtime_metadata "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh" "$PATH_UPDATE_MODE" "$PATH_PROFILE" "$PATH_MANAGED_BY_HODEXCTL" "$PATH_DETECTED_SOURCE"
 
   log_step "源码同步完成: $checkout_dir"
   print_source_result_summary "$action_label" "$profile_name" "$ref_name" "$checkout_dir" "" ""
@@ -5865,9 +6024,7 @@ perform_source_uninstall() {
   fi
 
   if [[ -f "$state_file" ]] && [[ "$final_source_count" == "0" ]] && ((final_has_release == 0)); then
-    if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
-      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
-    fi
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
     rm -f "${STATE_COMMAND_DIR:-$COMMAND_DIR}/hodexctl" 2>/dev/null || true
     rm -f "$state_file"
     rm -f "$STATE_DIR/list-ui-state.json"
@@ -6235,6 +6392,8 @@ perform_install_like() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$NODE_SETUP_CHOICE" \
     "$install_time"
 
@@ -6253,6 +6412,8 @@ perform_install_like() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$NODE_SETUP_CHOICE" \
     "$install_time"
 
@@ -6316,6 +6477,8 @@ perform_manager_install() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$STATE_NODE_SETUP_CHOICE" \
     "$install_time"
 
@@ -6334,6 +6497,8 @@ perform_manager_install() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$STATE_NODE_SETUP_CHOICE" \
     "$install_time"
 
@@ -6377,9 +6542,7 @@ perform_uninstall() {
 
     load_state_env "$state_file"
     log_step "卸载 hodexctl 管理器"
-    if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
-      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
-    fi
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
     rm -f "$STATE_COMMAND_DIR/hodexctl" 2>/dev/null || true
     rm -f "$STATE_CONTROLLER_PATH" 2>/dev/null || true
     rm -f "$state_file" 2>/dev/null || true
@@ -6399,10 +6562,8 @@ perform_uninstall() {
   clear_release_state_file "$state_file"
   sync_runtime_wrappers_from_state "$state_file" "$STATE_COMMAND_DIR" "$STATE_CONTROLLER_PATH"
 
-  if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
-    if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
-      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
-    fi
+  if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
   fi
 
   if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
@@ -6422,6 +6583,7 @@ perform_uninstall() {
 
 perform_status() {
   local state_file="$STATE_DIR/state.json"
+  local repair_needed=0
 
   printf '平台: %s\n' "$PLATFORM_LABEL"
   printf '状态目录: %s\n' "$STATE_DIR"
@@ -6449,6 +6611,8 @@ perform_status() {
     printf '命令目录: %s\n' "$STATE_COMMAND_DIR"
     printf '管理脚本副本: %s\n' "$STATE_CONTROLLER_PATH"
     printf 'PATH 处理: %s\n' "$STATE_PATH_UPDATE_MODE"
+    printf 'PATH 由 hodexctl 管理: %s\n' "$STATE_PATH_MANAGED_BY_HODEXCTL"
+    printf 'PATH 来源: %s\n' "${STATE_PATH_DETECTED_SOURCE:-<unknown>}"
     if [[ -n "$STATE_PATH_PROFILE" ]]; then
       printf 'PATH 配置文件: %s\n' "$STATE_PATH_PROFILE"
     fi
@@ -6468,6 +6632,27 @@ perform_status() {
       [[ -n "$profile_name" ]] || continue
       printf '源码条目: %s | %s | %s | 仅源码管理\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}"
     done < <(state_emit_source_profiles "$state_file")
+
+    if [[ -n "$STATE_CONTROLLER_PATH" && ! -f "$STATE_CONTROLLER_PATH" ]]; then
+      printf '诊断: 管理脚本副本缺失\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_COMMAND_DIR" && ! -x "$STATE_COMMAND_DIR/hodexctl" ]]; then
+      printf '诊断: hodexctl 包装器缺失\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_BINARY_PATH" && ! -f "$STATE_BINARY_PATH" ]]; then
+      printf '诊断: hodex 正式版二进制缺失\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_BINARY_PATH" && -f "$STATE_BINARY_PATH" && -n "$STATE_COMMAND_DIR" && ! -x "$STATE_COMMAND_DIR/hodex" ]]; then
+      printf '诊断: hodex 包装器缺失\n'
+      repair_needed=1
+    fi
+    if [[ "$STATE_PATH_DETECTED_SOURCE" == "current-process-only" ]]; then
+      printf '诊断: 当前终端 PATH 仅为临时可见，后续新 shell 不保证可用\n'
+      repair_needed=1
+    fi
   else
     printf '正式版安装状态: 未安装\n'
     printf '源码条目数量: 0\n'
@@ -6477,6 +6662,9 @@ perform_status() {
     printf 'PATH 中的 hodex: %s\n' "$(command -v hodex)"
   else
     printf 'PATH 中的 hodex: 未找到\n'
+    if [[ -f "$state_file" && -n "$STATE_BINARY_PATH" ]]; then
+      repair_needed=1
+    fi
   fi
 
   if command_exists codex; then
@@ -6489,6 +6677,10 @@ perform_status() {
     printf 'Node.js: %s\n' "$(node -v 2>/dev/null || printf '已安装')"
   else
     printf 'Node.js: 未安装\n'
+  fi
+
+  if ((repair_needed)); then
+    printf '建议执行: hodexctl repair\n'
   fi
 }
 
@@ -6521,9 +6713,28 @@ perform_relink() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$STATE_NODE_SETUP_CHOICE" \
     "$STATE_INSTALLED_AT"
   log_info "已重建正式版与管理脚本包装器到: $COMMAND_DIR"
+}
+
+perform_repair() {
+  local state_file="$STATE_DIR/state.json"
+  [[ -f "$state_file" ]] || die "未检测到 hodex 安装状态，无法修复。"
+
+  log_step "修复 hodexctl 本地状态"
+  perform_relink
+
+  load_state_env "$state_file"
+  if [[ -n "$STATE_BINARY_PATH" && ! -f "$STATE_BINARY_PATH" ]]; then
+    log_warn "检测到 hodex 正式版二进制缺失；已修复管理脚本、包装器与 PATH，但无法离线恢复二进制。"
+    log_info "下一步: 运行 'hodexctl install' 或 'hodexctl upgrade <version>' 恢复正式版。"
+    return
+  fi
+
+  log_info "repair 已完成。"
 }
 
 main() {
@@ -6579,6 +6790,9 @@ main() {
       ;;
     relink)
       perform_relink
+      ;;
+    repair)
+      perform_repair
       ;;
     manager-install)
       perform_manager_install

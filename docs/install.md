@@ -32,6 +32,12 @@ hodexctl install
 hodexctl list
 ```
 
+提示：
+
+- macOS / Linux / WSL 的 `curl | bash` 在子进程执行，安装后需要新开终端或按安装脚本输出执行 `source ~/.zshrc` / `source ~/.bashrc` 才能让当前会话立即识别 `hodexctl`。
+- Windows PowerShell 的 `irm | iex` 会尽量刷新当前会话的 `$env:Path`；如仍未生效，重新打开 PowerShell 即可。
+- 如遇到 PATH / wrapper / state 漂移导致命令不可用，可执行 `hodexctl repair` 自愈。
+
 常见用法：
 
 ```bash

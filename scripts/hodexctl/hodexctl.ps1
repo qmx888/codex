@@ -42,6 +42,8 @@ $script:ArchitectureName = ""
 $script:AssetCandidates = @()
 $script:PathUpdateMode = "skipped"
 $script:PathProfile = ""
+$script:PathManagedByHodexctl = $false
+$script:PathDetectedSource = ""
 $script:NodeSetupChoice = "skip"
 $script:State = $null
 $script:RequestedCommand = $Command
@@ -96,6 +98,7 @@ function Show-Usage {
   status                 查看当前安装状态
   list                   交互式列出当前平台可下载版本，并支持查看更新日志
   relink                 重新生成 hodex / hodexctl 包装器
+  repair                 修复本地 wrapper / PATH / state 漂移问题
   help                   显示帮助
 
 选项:
@@ -128,6 +131,7 @@ function Show-Usage {
   hodexctl source status
   hodexctl source list
   hodexctl relink -CommandDir %LOCALAPPDATA%\hodex\commands
+  hodexctl repair
   hodexctl uninstall
 
 示例（独立下载脚本后直接运行）:
@@ -139,6 +143,7 @@ function Show-Usage {
   $standaloneCommand downgrade 1.2.2
   $standaloneCommand source install -GitUrl https://github.com/stellarlinkco/codex.git -Ref main
   $standaloneCommand relink -CommandDir %LOCALAPPDATA%\hodex\commands
+  $standaloneCommand repair
   $standaloneCommand uninstall
 "@ | Write-Host
 }
@@ -734,7 +739,7 @@ function Ensure-DirWritable {
 }
 
 function Normalize-Parameters {
-    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "help", "manager-install")
+    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "repair", "help", "manager-install")
 
     if ($script:InvokedWithNoArgs) {
         Show-Usage
@@ -797,6 +802,11 @@ function Normalize-Parameters {
         "relink" {
             if ($PSBoundParameters.ContainsKey("Version")) {
                 Fail "relink 不接受额外版本参数"
+            }
+        }
+        "repair" {
+            if ($PSBoundParameters.ContainsKey("Version")) {
+                Fail "repair 不接受额外版本参数"
             }
         }
         "manager-install" {
@@ -938,10 +948,13 @@ function Ensure-StateShape {
         $State | Add-Member -NotePropertyName active_runtime_aliases -NotePropertyValue ([ordered]@{}) -Force
     }
 
-    foreach ($field in @("repo", "installed_version", "release_tag", "release_name", "asset_name", "binary_path", "command_dir", "path_update_mode", "path_profile", "node_setup_choice", "installed_at")) {
+    foreach ($field in @("repo", "installed_version", "release_tag", "release_name", "asset_name", "binary_path", "command_dir", "path_update_mode", "path_profile", "path_detected_source", "node_setup_choice", "installed_at")) {
         if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains $field) {
             $State | Add-Member -NotePropertyName $field -NotePropertyValue "" -Force
         }
+    }
+    if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains "path_managed_by_hodexctl") {
+        $State | Add-Member -NotePropertyName path_managed_by_hodexctl -NotePropertyValue $false -Force
     }
     if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains "wrappers_created" -or $null -eq $State.wrappers_created) {
         $State | Add-Member -NotePropertyName wrappers_created -NotePropertyValue @() -Force
@@ -1074,6 +1087,8 @@ function Write-State {
         wrappers_created  = $WrappersCreated
         path_update_mode  = $CurrentPathUpdateMode
         path_profile      = $CurrentPathProfile
+        path_managed_by_hodexctl = $script:PathManagedByHodexctl
+        path_detected_source = $script:PathDetectedSource
         node_setup_choice = $CurrentNodeSetupChoice
         installed_at      = $InstalledAt
         source_profiles   = [ordered]@{}
@@ -1290,9 +1305,12 @@ function Select-CommandDir {
 function Update-PathIfNeeded {
     $script:PathUpdateMode = "skipped"
     $script:PathProfile = ""
+    $script:PathManagedByHodexctl = $false
+    $script:PathDetectedSource = ""
 
     if ($NoPathUpdate) {
         $script:PathUpdateMode = "disabled"
+        $script:PathDetectedSource = "disabled"
         return
     }
 
@@ -1310,23 +1328,26 @@ function Update-PathIfNeeded {
         $env:Path = Replace-PathEntry -PathValue $currentPath -OldEntry ([string]$script:State.command_dir) -NewEntry $script:CurrentCommandDir
         $script:PathUpdateMode = "configured"
         $script:PathProfile = "User"
+        $script:PathManagedByHodexctl = $true
+        $script:PathDetectedSource = "managed-user-path"
         return
     }
 
     if (Test-PathContains -PathValue $userPath -Entry $script:CurrentCommandDir) {
         if (-not (Test-PathContains -PathValue $currentPath -Entry $script:CurrentCommandDir)) {
             $env:Path = Add-PathEntry -PathValue $currentPath -Entry $script:CurrentCommandDir
-            $script:PathUpdateMode = "configured"
+            $script:PathUpdateMode = "already"
         } else {
             $script:PathUpdateMode = "already"
         }
         $script:PathProfile = "User"
+        $script:PathManagedByHodexctl = $false
+        $script:PathDetectedSource = "preexisting-user-path"
         return
     }
 
     if (Test-PathContains -PathValue $currentPath -Entry $script:CurrentCommandDir) {
-        $script:PathUpdateMode = "already"
-        return
+        $script:PathDetectedSource = "current-process-only"
     }
 
     $shouldUpdate = $true
@@ -1339,6 +1360,9 @@ function Update-PathIfNeeded {
 
     if (-not $shouldUpdate) {
         $script:PathUpdateMode = "user-skipped"
+        if ([string]::IsNullOrWhiteSpace($script:PathDetectedSource)) {
+            $script:PathDetectedSource = "user-skipped"
+        }
         return
     }
 
@@ -1347,6 +1371,8 @@ function Update-PathIfNeeded {
     $env:Path = Add-PathEntry -PathValue $currentPath -Entry $script:CurrentCommandDir
     $script:PathUpdateMode = "added"
     $script:PathProfile = "User"
+    $script:PathManagedByHodexctl = $true
+    $script:PathDetectedSource = "managed-user-path"
 }
 
 function Persist-StateRuntimeMetadata {
@@ -1357,6 +1383,8 @@ function Persist-StateRuntimeMetadata {
     $script:State.command_dir = $script:CurrentCommandDir
     $script:State.path_update_mode = $script:PathUpdateMode
     $script:State.path_profile = $script:PathProfile
+    $script:State.path_managed_by_hodexctl = $script:PathManagedByHodexctl
+    $script:State.path_detected_source = $script:PathDetectedSource
     Save-State -State $script:State
 }
 
@@ -1366,7 +1394,19 @@ function Remove-PathIfNeeded {
         [string]$CurrentPathUpdateMode
     )
 
-    if ($CurrentPathUpdateMode -notin @("added", "configured")) {
+    $managedByHodexctl = $false
+    if ($script:State -and $script:State.path_managed_by_hodexctl) {
+        $managedByHodexctl = $true
+    } elseif (
+        $script:State -and
+        [string]::IsNullOrWhiteSpace([string]$script:State.path_detected_source) -and
+        $CurrentPathUpdateMode -in @("added", "configured")
+    ) {
+        # 兼容旧版 state.json：缺少 path_managed_by_hodexctl 时，根据旧字段推断卸载应回滚用户 PATH。
+        $managedByHodexctl = $true
+    }
+
+    if (-not $managedByHodexctl) {
         return
     }
 
@@ -4284,6 +4324,7 @@ function Invoke-Uninstall {
 }
 
 function Invoke-Status {
+    $repairNeeded = $false
     Write-Output "平台: $script:PlatformLabel"
     Write-Output "状态目录: $script:StateRoot"
 
@@ -4315,6 +4356,8 @@ function Invoke-Status {
         Write-Output "命令目录: $([string]$script:State.command_dir)"
         Write-Output "管理脚本副本: $([string]$script:State.controller_path)"
         Write-Output "PATH 处理: $([string]$script:State.path_update_mode)"
+        Write-Output ("PATH 由 hodexctl 管理: " + $(if ($script:State.path_managed_by_hodexctl) { "true" } else { "false" }))
+        Write-Output "PATH 来源: $([string]$script:State.path_detected_source)"
         if (-not [string]::IsNullOrWhiteSpace([string]$script:State.path_profile)) {
             Write-Output "PATH 作用域: $([string]$script:State.path_profile)"
         }
@@ -4334,6 +4377,27 @@ function Invoke-Status {
             $profile = Get-SourceProfile -ProfileName $profileName
             Write-Output ("源码条目: {0} | {1} | {2} | 仅源码管理" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref)
         }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.controller_path) -and -not (Test-Path -LiteralPath ([string]$script:State.controller_path))) {
+            Write-Output "诊断: 管理脚本副本缺失"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir) -and -not (Test-Path -LiteralPath (Join-Path ([string]$script:State.command_dir) "hodexctl.cmd"))) {
+            Write-Output "诊断: hodexctl 包装器缺失"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and -not (Test-Path -LiteralPath ([string]$script:State.binary_path))) {
+            Write-Output "诊断: hodex 正式版二进制缺失"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and (Test-Path -LiteralPath ([string]$script:State.binary_path)) -and -not (Test-Path -LiteralPath (Join-Path ([string]$script:State.command_dir) "hodex.cmd"))) {
+            Write-Output "诊断: hodex 包装器缺失"
+            $repairNeeded = $true
+        }
+        if ([string]$script:State.path_detected_source -eq "current-process-only") {
+            Write-Output "诊断: 当前会话 PATH 仅为临时可见，后续新终端不保证可用"
+            $repairNeeded = $true
+        }
     } else {
         Write-Output "正式版安装状态: 未安装"
         Write-Output "源码条目数量: 0"
@@ -4344,6 +4408,9 @@ function Invoke-Status {
         Write-Output "PATH 中的 hodex: $($hodexCmd.Source)"
     } else {
         Write-Output "PATH 中的 hodex: 未找到"
+        if ($script:State -and -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
+            $repairNeeded = $true
+        }
     }
 
     $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
@@ -4358,6 +4425,10 @@ function Invoke-Status {
         Write-Output "Node.js: $(& $nodeCmd.Source -v)"
     } else {
         Write-Output "Node.js: 未安装"
+    }
+
+    if ($repairNeeded) {
+        Write-Output "建议执行: hodexctl repair"
     }
 }
 
@@ -4398,6 +4469,24 @@ function Invoke-Relink {
     Update-PathIfNeeded
     Persist-StateRuntimeMetadata
     Write-Info "已重建正式版与管理脚本包装器到: $script:CurrentCommandDir"
+}
+
+function Invoke-Repair {
+    if (-not $script:State) {
+        Fail "未检测到 hodex 安装状态，无法修复。"
+    }
+
+    Write-Step "修复 hodexctl 本地状态"
+    Invoke-Relink
+
+    $script:State = Load-State
+    if ($script:State -and -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and -not (Test-Path -LiteralPath ([string]$script:State.binary_path))) {
+        Write-WarnLine "检测到 hodex 正式版二进制缺失；已修复管理脚本、包装器与 PATH，但无法离线恢复二进制。"
+        Write-Info "下一步: 运行 'hodexctl install' 或 'hodexctl upgrade <version>' 恢复正式版。"
+        return
+    }
+
+    Write-Info "repair 已完成。"
 }
 
 if (-not $env:HODEXCTL_SKIP_MAIN) {
@@ -4446,6 +4535,9 @@ if (-not $env:HODEXCTL_SKIP_MAIN) {
         }
         "relink" {
             Invoke-Relink
+        }
+        "repair" {
+            Invoke-Repair
         }
         "manager-install" {
             Invoke-ManagerInstall

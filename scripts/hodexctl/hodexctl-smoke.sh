@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTROLLER_PATH="$SCRIPT_DIR/hodexctl.sh"
+INSTALLER_PATH="$SCRIPT_DIR/../install-hodexctl.sh"
 
 log_step() {
   printf '==> %s\n' "$1"
@@ -24,6 +25,14 @@ assert_contains() {
   local file_path="$1"
   local expected="$2"
   grep -F -- "$expected" "$file_path" >/dev/null 2>&1 || die "未在 ${file_path} 中找到预期内容: ${expected}"
+}
+
+assert_not_contains() {
+  local file_path="$1"
+  local unexpected="$2"
+  if grep -F -- "$unexpected" "$file_path" >/dev/null 2>&1; then
+    die "不应在 ${file_path} 中出现: ${unexpected}"
+  fi
 }
 
 assert_not_exists() {
@@ -54,6 +63,12 @@ nojson_status_output="$tmp_dir/nojson-status.txt"
 activate_error_output="$tmp_dir/activate-error.txt"
 release_install_output="$tmp_dir/release-install.txt"
 release_uninstall_output="$tmp_dir/release-uninstall.txt"
+path_fix_install_output="$tmp_dir/path-fix-install.txt"
+repair_install_output="$tmp_dir/repair-install.txt"
+repair_status_output="$tmp_dir/repair-status.txt"
+repair_output="$tmp_dir/repair-output.txt"
+installer_output="$tmp_dir/installer-output.txt"
+installer_no_path_output="$tmp_dir/installer-no-path-output.txt"
 download_summary_output="$tmp_dir/download-summary.txt"
 gh_fallback_output="$tmp_dir/gh-fallback.txt"
 gh_missing_output="$tmp_dir/gh-missing.txt"
@@ -69,6 +84,12 @@ state_dir="$tmp_dir/state"
 command_dir="$tmp_dir/commands"
 release_state_dir="$tmp_dir/release-state"
 release_command_dir="$tmp_dir/release-commands"
+path_fix_home_dir="$tmp_dir/path-fix-home"
+path_fix_state_dir="$tmp_dir/path-fix-state"
+path_fix_command_dir="$tmp_dir/path-fix-command"
+repair_home_dir="$tmp_dir/repair-home"
+repair_state_dir="$tmp_dir/repair-state"
+repair_command_dir="$tmp_dir/repair-command"
 source_checkout_dir="$tmp_dir/source-checkout"
 source_repo_dir="$tmp_dir/source-repo"
 source_home_dir="$tmp_dir/source-home"
@@ -164,6 +185,73 @@ HOME="$manager_home_dir" "$CONTROLLER_PATH" manager-install --state-dir "$manage
 unset HODEX_STATE_DIR HODEXCTL_REPO HODEX_CONTROLLER_URL_BASE || true
 "$manager_state_dir/commands/hodexctl" status >"$manager_status_output"
 assert_contains "$manager_status_output" "状态目录: $manager_state_dir"
+
+log_step "检查一键安装脚本输出（zsh）"
+installer_repo="smoke-repo"
+installer_mirror_root="$tmp_dir/installer-mirror"
+installer_home_dir="$tmp_dir/installer-home"
+installer_state_dir="$tmp_dir/installer-state"
+mkdir -p "$installer_mirror_root/$installer_repo/main/scripts/hodexctl"
+cp "$CONTROLLER_PATH" "$installer_mirror_root/$installer_repo/main/scripts/hodexctl/hodexctl.sh"
+chmod +x "$installer_mirror_root/$installer_repo/main/scripts/hodexctl/hodexctl.sh"
+mkdir -p "$installer_home_dir"
+touch "$installer_home_dir/.zshrc"
+HOME="$installer_home_dir" SHELL="/bin/zsh" HODEX_CONTROLLER_URL_BASE="file://$installer_mirror_root" \
+  HODEXCTL_REPO="$installer_repo" HODEX_STATE_DIR="$installer_state_dir" \
+  bash "$INSTALLER_PATH" >"$installer_output" 2>&1
+assert_contains "$installer_output" "==> 安装完成"
+assert_contains "$installer_output" "$installer_state_dir/commands/hodexctl status"
+assert_contains "$installer_output" "source \"$installer_home_dir/.zshrc\""
+
+log_step "检查一键安装脚本跳过 PATH 更新不输出 source"
+installer_state_dir_no_path="$tmp_dir/installer-state-no-path"
+HOME="$installer_home_dir" SHELL="/bin/zsh" HODEXCTL_NO_PATH_UPDATE=1 HODEX_CONTROLLER_URL_BASE="file://$installer_mirror_root" \
+  HODEXCTL_REPO="$installer_repo" HODEX_STATE_DIR="$installer_state_dir_no_path" \
+  bash "$INSTALLER_PATH" >"$installer_no_path_output" 2>&1
+assert_contains "$installer_no_path_output" "==> 安装完成"
+assert_contains "$installer_no_path_output" "$installer_state_dir_no_path/commands/hodexctl status"
+assert_not_contains "$installer_no_path_output" "source \""
+
+log_step "检查旧 state.json 卸载仍会清理 PATH block"
+legacy_home_dir="$tmp_dir/legacy-home"
+legacy_state_dir="$tmp_dir/legacy-state"
+legacy_command_dir="$legacy_state_dir/commands"
+legacy_controller_path="$legacy_state_dir/libexec/hodexctl.sh"
+mkdir -p "$legacy_home_dir" "$legacy_command_dir" "$(dirname "$legacy_controller_path")"
+legacy_profile_file="$legacy_home_dir/.zshrc"
+{
+  printf 'export HODEX_SMOKE_SENTINEL=1\n'
+  printf '%s\n' "# >>> hodexctl >>>"
+  printf 'export PATH="%s:$PATH"\n' "$legacy_command_dir"
+  printf '%s\n' "# <<< hodexctl <<<"
+  printf 'export HODEX_SMOKE_SENTINEL_END=1\n'
+} >"$legacy_profile_file"
+touch "$legacy_command_dir/hodexctl"
+touch "$legacy_controller_path"
+cat >"$legacy_state_dir/state.json" <<JSON
+{
+  "schema_version": 2,
+  "repo": "stellarlinkco/codex",
+  "installed_version": "",
+  "release_tag": "",
+  "release_name": "",
+  "asset_name": "",
+  "binary_path": "",
+  "controller_path": "$legacy_controller_path",
+  "command_dir": "$legacy_command_dir",
+  "wrappers_created": [],
+  "path_update_mode": "added",
+  "path_profile": "$legacy_profile_file",
+  "node_setup_choice": "",
+  "installed_at": "2026-03-09T00:00:00Z",
+  "source_profiles": {},
+  "active_runtime_aliases": {}
+}
+JSON
+HOME="$legacy_home_dir" SHELL="/bin/zsh" "$CONTROLLER_PATH" uninstall --state-dir "$legacy_state_dir" >"$tmp_dir/legacy-uninstall.txt" 2>&1
+assert_contains "$legacy_profile_file" "export HODEX_SMOKE_SENTINEL=1"
+assert_contains "$legacy_profile_file" "export HODEX_SMOKE_SENTINEL_END=1"
+assert_not_contains "$legacy_profile_file" "# >>> hodexctl >>>"
 
 log_step "检查源码空状态输出"
 "$CONTROLLER_PATH" source status --state-dir "$state_dir" >"$source_status_output"
@@ -599,6 +687,42 @@ assert_contains "$release_uninstall_output" "已删除正式版二进制、包�
 assert_not_exists "$release_command_dir/hodex"
 assert_not_exists "$release_command_dir/hodexctl"
 assert_not_exists "$release_state_dir/state.json"
+
+log_step "检查 current-process-only 场景会自动持久化 PATH"
+mkdir -p "$path_fix_home_dir" "$path_fix_command_dir"
+HOME="$path_fix_home_dir" PATH="$path_fix_command_dir:/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" install \
+  --yes \
+  --state-dir "$path_fix_state_dir" \
+  --command-dir "$path_fix_command_dir" >"$path_fix_install_output" 2>&1
+assert_contains "$path_fix_state_dir/state.json" "\"path_detected_source\": \"managed-profile-block\""
+assert_contains "$path_fix_home_dir/.zshrc" "# >>> hodexctl >>>"
+assert_contains "$path_fix_home_dir/.zprofile" "# >>> hodexctl >>>"
+env -i HOME="$path_fix_home_dir" USER="$USER" SHELL=/bin/zsh TERM=xterm-256color PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  zsh -lc 'source ~/.zshrc >/dev/null 2>&1; command -v hodex; hodex --version' >"$tmp_dir/path-fix-shell.txt"
+assert_contains "$tmp_dir/path-fix-shell.txt" "$path_fix_command_dir/hodex"
+assert_contains "$tmp_dir/path-fix-shell.txt" "codex-cli 9.9.9"
+
+log_step "检查 repair 可修复未持久化 PATH 的安装"
+mkdir -p "$repair_home_dir" "$repair_command_dir"
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" install \
+  --yes \
+  --no-path-update \
+  --state-dir "$repair_state_dir" \
+  --command-dir "$repair_command_dir" >"$repair_install_output" 2>&1
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+"$CONTROLLER_PATH" status --state-dir "$repair_state_dir" --command-dir "$repair_command_dir" >"$repair_status_output"
+assert_contains "$repair_status_output" "建议执行: hodexctl repair"
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+"$CONTROLLER_PATH" repair --yes --state-dir "$repair_state_dir" --command-dir "$repair_command_dir" >"$repair_output" 2>&1
+assert_contains "$repair_output" "repair 已完成。"
+assert_contains "$repair_home_dir/.zshrc" "# >>> hodexctl >>>"
+env -i HOME="$repair_home_dir" USER="$USER" SHELL=/bin/zsh TERM=xterm-256color PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  zsh -lc 'source ~/.zshrc >/dev/null 2>&1; command -v hodex; hodex --version' >"$tmp_dir/repair-shell.txt"
+assert_contains "$tmp_dir/repair-shell.txt" "$repair_command_dir/hodex"
+assert_contains "$tmp_dir/repair-shell.txt" "codex-cli 9.9.9"
+
 stop_background_process "$release_server_pid"
 release_server_pid=""
 trap 'rm -rf "$tmp_dir"' EXIT
