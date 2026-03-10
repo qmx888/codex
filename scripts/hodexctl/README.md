@@ -53,15 +53,11 @@ hodexctl
 如果你希望手动下载脚本再运行，也可以使用：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.sh -o ./hodexctl.sh
-chmod +x ./hodexctl.sh
-./hodexctl.sh
+curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.sh -o ./hodexctl.sh && chmod +x ./hodexctl.sh && ./hodexctl.sh
 ```
 
 ```powershell
-$script = Join-Path $env:TEMP "hodexctl.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.ps1 -OutFile $script
-& $script
+$script = Join-Path $env:TEMP "hodexctl.ps1"; Invoke-WebRequest https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.ps1 -OutFile $script; & $script
 ```
 
 ### 常用命令
@@ -137,8 +133,11 @@ hodexctl status
 如果你遇到安装/升级后 `hodex` 或 `hodexctl` 命令找不到，优先执行：
 
 ```bash
-hodexctl status
-hodexctl repair
+hodexctl status && hodexctl repair
+```
+
+```powershell
+hodexctl status; hodexctl repair
 ```
 
 `relink` 与 `repair` 的区别：

@@ -26,11 +26,9 @@ irm https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install-h
 
 安装完成后，后续统一使用：
 
-```bash
-hodexctl
-hodexctl install
-hodexctl list
-```
+- `hodexctl`
+- `hodexctl install`
+- `hodexctl list`
 
 提示：
 
@@ -40,19 +38,19 @@ hodexctl list
 
 常见用法：
 
-```bash
-./scripts/hodexctl/hodexctl.sh install
-hodexctl list
-hodexctl upgrade
-hodexctl status
-```
+macOS / Linux / WSL：
 
-```powershell
-.\scripts\hodexctl\hodexctl.ps1 install
-hodexctl list
-hodexctl upgrade
-hodexctl status
-```
+- `./scripts/hodexctl/hodexctl.sh install`
+- `hodexctl list`
+- `hodexctl upgrade`
+- `hodexctl status`
+
+Windows PowerShell：
+
+- `.\scripts\hodexctl\hodexctl.ps1 install`
+- `hodexctl list`
+- `hodexctl upgrade`
+- `hodexctl status`
 
 说明：
 
