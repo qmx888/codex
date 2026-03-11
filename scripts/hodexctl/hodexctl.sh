@@ -26,8 +26,8 @@ AUTO_YES=0
 NO_PATH_UPDATE=0
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 CONTROLLER_URL_BASE="${HODEX_CONTROLLER_URL_BASE:-$DEFAULT_CONTROLLER_URL_BASE}"
+CONTROLLER_REF="${HODEX_CONTROLLER_REF:-main}"
 RELEASE_BASE_URL="${HODEX_RELEASE_BASE_URL:-}"
-EXPLICIT_COMMAND_DIR=0
 API_USER_AGENT="hodexctl"
 FORCED_COMMAND=""
 SOURCE_ACTION=""
@@ -69,7 +69,6 @@ COLOR_ALERT=""
 TEE_COMMAND=""
 ORIGINAL_STDOUT_IS_TTY=0
 
-STATE_REPO=""
 STATE_INSTALLED_VERSION=""
 STATE_RELEASE_TAG=""
 STATE_RELEASE_NAME=""
@@ -79,8 +78,14 @@ STATE_CONTROLLER_PATH=""
 STATE_COMMAND_DIR=""
 STATE_PATH_UPDATE_MODE=""
 STATE_PATH_PROFILE=""
+STATE_PATH_MANAGED_BY_HODEXCTL="false"
+STATE_PATH_DETECTED_SOURCE=""
 STATE_NODE_SETUP_CHOICE=""
 STATE_INSTALLED_AT=""
+PATH_UPDATE_MODE=""
+PATH_PROFILE=""
+PATH_MANAGED_BY_HODEXCTL="false"
+PATH_DETECTED_SOURCE=""
 
 usage() {
   local usage_command standalone_command
@@ -91,42 +96,43 @@ usage() {
   fi
 
   cat <<EOF
-用法:
+Usage:
   ${usage_command}
   ${usage_command} <command> [version] [options]
 
-命令:
-  install [version]      初始安装或重装 hodex，默认安装 latest
-  upgrade [version]      升级到 latest 或指定版本
-  download [version]     下载当前平台资产到下载目录，默认 latest
-  downgrade <version>    降级到指定版本
-  source <action>        源码下载/同步/工具链管理
-  uninstall              卸载 hodex 相关文件
-  status                 查看当前安装状态
-  list                   交互式列出当前平台可下载版本，并支持查看更新日志
-  relink                 重新生成 hodex / hodexctl 包装器
-  help                   显示帮助
+Commands:
+  install [version]      Install or reinstall hodex (default: latest)
+  upgrade [version]      Upgrade to latest or a specific version
+  download [version]     Download release asset for current platform (default: latest)
+  downgrade <version>    Downgrade to a specific version
+  source <action>        Source download/sync/toolchain management
+  uninstall              Remove hodex files
+  status                 Show current install status
+  list                   Interactive version list + changelog
+  relink                 Regenerate hodex / hodexctl wrappers
+  repair                 Self-heal wrapper / PATH / state drift
+  help                   Show help
 
-选项:
-  --repo <owner/repo>            指定 GitHub 仓库，默认 stellarlinkco/codex
-  --install-dir <path>           指定命令目录（等价于 --command-dir）
-  --command-dir <path>           指定生成 hodex / hodexctl 的目录
-  --state-dir <path>             指定状态目录，默认 ~/.hodex
-  --download-dir <path>          指定下载目录，默认 ~/downloads
-  --node-mode <mode>             Node 处理策略：ask|skip|native|nvm|manual
-  --git-url <url>                源码模式指定 Git clone 地址
-  --ref <branch|tag|commit>      源码模式指定分支、标签或提交，默认 main
-  --checkout-dir <path>          源码模式指定源码 checkout 目录
-  --profile <profile-name>       源码模式指定源码记录名，默认 codex-source
-  --keep-checkout                源码卸载时保留源码目录
-  --remove-checkout              源码卸载时删除源码目录
-  --list                         等价于 list
-  --yes, -y                      非交互模式，使用默认选项
-  --no-path-update               不自动修改 PATH
-  --github-token <token>         GitHub API Token，缓解速率限制
-  --help, -h                     显示帮助
+Options:
+  --repo <owner/repo>            GitHub repo (default: stellarlinkco/codex)
+  --install-dir <path>           Command dir (same as --command-dir)
+  --command-dir <path>           Directory for hodex / hodexctl wrappers
+  --state-dir <path>             State dir (default: ~/.hodex)
+  --download-dir <path>          Download dir (default: ~/downloads)
+  --node-mode <mode>             Node handling: ask|skip|native|nvm|manual
+  --git-url <url>                Source mode Git clone URL
+  --ref <branch|tag|commit>      Source mode ref (default: main)
+  --checkout-dir <path>          Source mode checkout dir
+  --profile <profile-name>       Source profile name (default: codex-source)
+  --keep-checkout                Keep checkout on source uninstall
+  --remove-checkout              Remove checkout on source uninstall
+  --list                         Same as list
+  --yes, -y                      Non-interactive (accept defaults)
+  --no-path-update               Do not modify PATH
+  --github-token <token>         GitHub API token (mitigate rate limit)
+  --help, -h                     Show help
 
-示例（已安装后，推荐通过 hodexctl 使用）:
+Examples (after install, recommended via hodexctl):
   hodexctl
   hodexctl status
   hodexctl list
@@ -138,9 +144,10 @@ usage() {
   hodexctl source status
   hodexctl source list
   hodexctl relink --command-dir ~/.local/bin
+  hodexctl repair
   hodexctl uninstall
 
-示例（独立下载脚本后直接运行）:
+Examples (run script directly):
   ${standalone_command} install
   ${standalone_command} install 1.2.2
   ${standalone_command} upgrade
@@ -149,6 +156,7 @@ usage() {
   ${standalone_command} downgrade 1.2.2
   ${standalone_command} source install --git-url https://github.com/stellarlinkco/codex.git --ref main
   ${standalone_command} relink --command-dir ~/.local/bin
+  ${standalone_command} repair
   ${standalone_command} uninstall
 EOF
 }
@@ -162,29 +170,29 @@ source_usage() {
   fi
 
   cat <<EOF
-源码模式用法:
+Source mode usage:
   ${usage_command} <action> [options]
 
-动作:
-  install                下载源码并准备工具链（不接管 hodex）
-  update                 同步当前 ref 最新代码并复用现有 checkout
-  switch                 切换到指定 --ref 并同步源码
-  status                 查看源码记录状态
-  uninstall              移除源码记录，可选删除 checkout
-  list                   列出所有源码记录
-  help                   显示本帮助
+Actions:
+  install                Download source and prepare toolchain (does not take over hodex)
+  update                 Sync latest code for current ref and reuse checkout
+  switch                 Switch to --ref and sync source
+  status                 Show source profile status
+  uninstall              Remove source profile (optional checkout deletion)
+  list                   List all source profiles
+  help                   Show help
 
-常用选项:
-  --repo <owner/repo>            使用 GitHub 仓库名
-  --git-url <url>                使用 HTTPS / SSH Git URL
-  --ref <branch|tag|commit>      指定源码分支、标签或提交
-  --checkout-dir <path>          指定源码 checkout 目录
-  --profile <profile-name>       指定源码记录名（工作区标识），默认 codex-source
-                                  备注: 这不是命令名，也不会接管 hodex
-  --keep-checkout                源码卸载时保留 checkout
-  --remove-checkout              源码卸载时删除 checkout
+Common options:
+  --repo <owner/repo>            GitHub repo
+  --git-url <url>                HTTPS / SSH Git URL
+  --ref <branch|tag|commit>      Source ref
+  --checkout-dir <path>          Source checkout dir
+  --profile <profile-name>       Source profile name (default: codex-source)
+                                  Note: this is not a command name and will not take over hodex
+  --keep-checkout                Keep checkout on uninstall
+  --remove-checkout              Remove checkout on uninstall
 
-示例:
+Examples:
   hodexctl source install --repo stellarlinkco/codex --ref main
   hodexctl source install --git-url git@github.com:someone/codex.git --profile codex-fork
   hodexctl source switch --profile codex-source --ref feature/my-branch
@@ -201,25 +209,25 @@ list_usage() {
   fi
 
   cat <<EOF
-版本列表用法:
+Release list usage:
   ${usage_command}
 
-列表页操作:
-  ↑ / ↓    移动当前选中版本
-  ← / →    翻页
-  n / p    下一页 / 上一页
-  /        实时搜索
-  0        进入源码下载 / 管理
-  Enter    查看版本更新日志
-  ?        显示快捷键帮助
-  q        退出
+List view:
+  ↑ / ↓    Move selection
+  ← / →    Change page
+  n / p    Next / previous page
+  /        Search
+  0        Enter source download/management
+  Enter    View changelog
+  ?        Show help
+  q        Quit
 
-更新日志页操作:
-  a        AI总结（调用 hodex/codex）
-  i        安装当前版本
-  d        下载当前平台资产
-  b        返回版本列表
-  q        退出
+Changelog view:
+  a        AI summary (hodex/codex)
+  i        Install selected version
+  d        Download asset for current platform
+  b        Back to list
+  q        Quit
 EOF
 }
 
@@ -232,11 +240,11 @@ log_info() {
 }
 
 log_warn() {
-  printf '警告: %s\n' "$1" >&2
+  printf 'Warning: %s\n' "$1" >&2
 }
 
 die() {
-  printf '错误: %s\n' "$1" >&2
+  printf 'Error: %s\n' "$1" >&2
   exit 1
 }
 
@@ -349,7 +357,7 @@ run_with_retry() {
       return "$exit_code"
     fi
 
-    log_warn "$label 失败，将在 ${delay_seconds}s 后重试（${attempt}/${max_attempts}）：$(retry_error_summary "$stderr_file")"
+    log_warn "$label failed; retrying in ${delay_seconds}s (${attempt}/${max_attempts}): $(retry_error_summary "$stderr_file")"
     rm -f "$stdout_file" "$stderr_file"
     sleep "$delay_seconds"
     attempt=$((attempt + 1))
@@ -359,6 +367,7 @@ run_with_retry() {
 
 normalize_user_path() {
   local raw="$1"
+  # shellcheck disable=SC2088
   case "$raw" in
     "~")
       printf '%s\n' "$HOME"
@@ -398,67 +407,66 @@ parse_args() {
   local original_argc=$#
   while (($# > 0)); do
     case "$1" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | repair | help | manager-install)
         positional+=("$1")
         shift
         ;;
       --repo)
-        (($# >= 2)) || die "--repo 需要参数"
+        (($# >= 2)) || die "--repo requires a value"
         REPO="$2"
         EXPLICIT_SOURCE_REPO=1
         shift 2
         ;;
       --install-dir | --command-dir)
-        (($# >= 2)) || die "$1 需要参数"
+        (($# >= 2)) || die "$1 requires a value"
         COMMAND_DIR="$(normalize_user_path "$2")"
-        EXPLICIT_COMMAND_DIR=1
         shift 2
         ;;
       --state-dir)
-        (($# >= 2)) || die "--state-dir 需要参数"
+        (($# >= 2)) || die "--state-dir requires a value"
         STATE_DIR="$(normalize_user_path "$2")"
         shift 2
         ;;
       --download-dir)
-        (($# >= 2)) || die "--download-dir 需要参数"
+        (($# >= 2)) || die "--download-dir requires a value"
         DOWNLOAD_DIR="$(normalize_user_path "$2")"
         shift 2
         ;;
       --node-mode)
-        (($# >= 2)) || die "--node-mode 需要参数"
+        (($# >= 2)) || die "--node-mode requires a value"
         NODE_MODE="$2"
         shift 2
         ;;
       --git-url)
-        (($# >= 2)) || die "--git-url 需要参数"
+        (($# >= 2)) || die "--git-url requires a value"
         SOURCE_GIT_URL="$2"
         shift 2
         ;;
       --ref)
-        (($# >= 2)) || die "--ref 需要参数"
+        (($# >= 2)) || die "--ref requires a value"
         SOURCE_REF="$2"
         EXPLICIT_SOURCE_REF=1
         shift 2
         ;;
       --checkout-dir)
-        (($# >= 2)) || die "--checkout-dir 需要参数"
+        (($# >= 2)) || die "--checkout-dir requires a value"
         SOURCE_CHECKOUT_DIR="$(normalize_user_path "$2")"
         shift 2
         ;;
       --profile | --name)
-        (($# >= 2)) || die "$1 需要参数"
+        (($# >= 2)) || die "$1 requires a value"
         if [[ "$1" == "--name" ]]; then
-          log_warn "--name 已废弃，请改用 --profile。"
+          log_warn "--name is deprecated; use --profile."
         fi
         SOURCE_PROFILE="$2"
         EXPLICIT_SOURCE_PROFILE=1
         shift 2
         ;;
       --activate)
-        die "源码模式不允许接管 hodex；源码 checkout 仅用于同步与工具链管理。"
+        die "Source mode will not take over hodex; source checkout is only for sync and toolchain management."
         ;;
       --no-activate)
-        die "源码模式不接管 hodex，也不会生成源码命令入口，因此不支持 --no-activate。"
+        die "Source mode will not take over hodex and will not create source command wrappers; --no-activate is not supported."
         ;;
       --keep-checkout)
         SOURCE_CHECKOUT_POLICY="keep"
@@ -481,7 +489,7 @@ parse_args() {
         shift
         ;;
       --github-token)
-        (($# >= 2)) || die "--github-token 需要参数"
+        (($# >= 2)) || die "--github-token requires a value"
         GITHUB_TOKEN="$2"
         shift 2
         ;;
@@ -490,7 +498,7 @@ parse_args() {
         shift
         ;;
       --*)
-        die "未知参数: $1"
+        die "Unknown argument: $1"
         ;;
       *)
         positional+=("$1")
@@ -506,7 +514,7 @@ parse_args() {
 
   if ((${#positional[@]} > 0)); then
     case "${positional[0]}" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | repair | help | manager-install)
         COMMAND="${positional[0]}"
         positional=("${positional[@]:1}")
         ;;
@@ -529,7 +537,7 @@ parse_args() {
       ;;
     downgrade)
       if ((${#positional[@]} == 0)); then
-        die "downgrade 需要显式指定版本"
+        die "downgrade requires an explicit version"
       fi
       REQUESTED_VERSION="${positional[0]}"
       positional=("${positional[@]:1}")
@@ -542,7 +550,7 @@ parse_args() {
         positional=("${positional[@]:1}")
       fi
       ;;
-    uninstall | status | list | relink)
+    uninstall | status | list | relink | repair | manager-install)
       ;;
     help)
       usage
@@ -551,14 +559,14 @@ parse_args() {
   esac
 
   if ((${#positional[@]} > 0)); then
-    die "多余参数: ${positional[*]}"
+    die "Unexpected extra args: ${positional[*]}"
   fi
 
   case "$NODE_MODE" in
     ask | skip | native | nvm | manual)
       ;;
     *)
-      die "--node-mode 仅支持 ask|skip|native|nvm|manual"
+      die "--node-mode supports only ask|skip|native|nvm|manual"
       ;;
   esac
 
@@ -567,7 +575,7 @@ parse_args() {
       install | update | rebuild | switch | status | uninstall | list | help)
         ;;
       *)
-        die "source 仅支持 install|update|switch|status|uninstall|list|help；兼容别名 rebuild 会直接提示已移除。"
+        die "source supports only install|update|switch|status|uninstall|list|help; rebuild alias was removed and now only shows a hint."
         ;;
     esac
 
@@ -606,23 +614,23 @@ init_json_backend_if_available() {
 }
 
 require_json_backend() {
-  local feature="${1:-当前命令}"
+  local feature="${1:-current command}"
   init_json_backend_if_available
   [[ -n "$JSON_BACKEND" ]] && return 0
-  die "${feature} 需要 python3 或 jq；请先安装其一后重试。"
+  die "${feature} requires python3 or jq; install one of them and retry."
 }
 
 require_base_commands() {
-  command_exists curl || die "缺少依赖: curl"
-  command_exists mktemp || die "缺少依赖: mktemp"
-  command_exists chmod || die "缺少依赖: chmod"
-  command_exists mkdir || die "缺少依赖: mkdir"
-  command_exists cp || die "缺少依赖: cp"
-  command_exists install || die "缺少依赖: install"
-  command_exists awk || die "缺少依赖: awk"
-  command_exists grep || die "缺少依赖: grep"
-  command_exists date || die "缺少依赖: date"
-  command_exists sleep || die "缺少依赖: sleep"
+  command_exists curl || die "Missing dependency: curl"
+  command_exists mktemp || die "Missing dependency: mktemp"
+  command_exists chmod || die "Missing dependency: chmod"
+  command_exists mkdir || die "Missing dependency: mkdir"
+  command_exists cp || die "Missing dependency: cp"
+  command_exists install || die "Missing dependency: install"
+  command_exists awk || die "Missing dependency: awk"
+  command_exists grep || die "Missing dependency: grep"
+  command_exists date || die "Missing dependency: date"
+  command_exists sleep || die "Missing dependency: sleep"
 }
 
 init_color_theme() {
@@ -673,7 +681,7 @@ detect_platform() {
       OS_NAME="linux"
       ;;
     *)
-      die "当前脚本仅支持 macOS、Linux 和 WSL；Windows 请使用 scripts/hodexctl/hodexctl.ps1"
+      die "This script supports macOS, Linux, and WSL only; use scripts/hodexctl/hodexctl.ps1 on Windows."
       ;;
   esac
 
@@ -689,7 +697,7 @@ detect_platform() {
       ARCH_NAME="x86_64"
       ;;
     *)
-      die "不支持的架构: $uname_m"
+      die "Unsupported architecture: $uname_m"
       ;;
   esac
 
@@ -817,7 +825,7 @@ gh_api_get_to_file() {
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "$api_path" >"$output" 2>"$stderr_file"; then
       GH_API_FALLBACK_REASON="gh-success"
-      GH_API_FALLBACK_DETAIL="已自动改用 gh api 获取 GitHub 数据。"
+      GH_API_FALLBACK_DETAIL="Automatically switched to gh api for GitHub data."
       rm -f "$stderr_file"
       return 0
     fi
@@ -827,7 +835,7 @@ gh_api_get_to_file() {
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "$api_path" >"$output" 2>"$stderr_file"; then
       GH_API_FALLBACK_REASON="gh-success"
-      GH_API_FALLBACK_DETAIL="已自动改用 gh api 获取 GitHub 数据。"
+      GH_API_FALLBACK_DETAIL="Automatically switched to gh api for GitHub data."
       rm -f "$stderr_file"
       return 0
     fi
@@ -853,22 +861,22 @@ github_api_fetch_failure_message() {
       printf '%s\n%s\n' "$base_message" "$GH_API_FALLBACK_DETAIL"
       ;;
     gh-missing)
-      printf '%s。当前未检测到 gh，可设置 GITHUB_TOKEN 或安装并登录 gh 后重试。\n' "$base_message"
+      printf '%s. gh is not available; set GITHUB_TOKEN or install and authenticate gh, then retry.\n' "$base_message"
       ;;
     gh-not-authenticated)
-      printf '%s。已尝试 gh 兜底，但 gh 未登录；请执行 gh auth login，或设置 GITHUB_TOKEN 后重试。\n' "$base_message"
+      printf '%s. gh fallback attempted, but gh is not authenticated; run gh auth login or set GITHUB_TOKEN, then retry.\n' "$base_message"
       ;;
     gh-access-denied)
-      printf '%s。已尝试 gh 兜底，但当前 gh 登录态或 token 对仓库 %s 没有足够权限：%s\n' "$base_message" "$REPO" "${GH_API_FALLBACK_DETAIL:-<unknown>}"
+      printf '%s. gh fallback attempted, but the current gh session/token lacks access to %s: %s\n' "$base_message" "$REPO" "${GH_API_FALLBACK_DETAIL:-<unknown>}"
       ;;
     gh-failed)
-      printf '%s。已尝试 gh 兜底，但 gh api 仍失败：%s\n' "$base_message" "${GH_API_FALLBACK_DETAIL:-<unknown>}"
+      printf '%s. gh fallback attempted, but gh api still failed: %s\n' "$base_message" "${GH_API_FALLBACK_DETAIL:-<unknown>}"
       ;;
     *)
       if [[ -n "$GITHUB_TOKEN" ]]; then
-        printf '%s。已提供 GITHUB_TOKEN，但 GitHub API 仍不可用；也可尝试 gh auth login 后重试。\n' "$base_message"
+        printf '%s. GITHUB_TOKEN is set but GitHub API is still unavailable; you can also try gh auth login.\n' "$base_message"
       else
-        printf '%s。可设置 GITHUB_TOKEN，或安装并登录 gh 后重试。\n' "$base_message"
+        printf '%s. Set GITHUB_TOKEN, or install and authenticate gh, then retry.\n' "$base_message"
       fi
       ;;
   esac
@@ -923,12 +931,12 @@ curl_download_with_stats() {
 download_binary() {
   local url="$1"
   local output="$2"
-  local label="${3:-下载文件}"
+  local label="${3:-download file}"
   local curl_args=(-fL "$url" -o "$output")
   local stats_file bytes_downloaded average_speed elapsed
 
   if [[ -t 1 ]]; then
-    log_info "开始下载: $label"
+    log_info "Starting download: $label"
     if curl --help all 2>/dev/null | grep -F -- '--progress-bar' >/dev/null 2>&1; then
       curl_args=(--progress-bar "${curl_args[@]}")
     fi
@@ -948,7 +956,7 @@ download_binary() {
   rm -f "$stats_file"
 
   if [[ -n "$bytes_downloaded" && -n "$average_speed" && -n "$elapsed" ]]; then
-    log_info "下载完成: $(format_byte_size "$bytes_downloaded")，耗时 $(format_duration_seconds "$elapsed")，平均速度 $(format_byte_size "$average_speed")/s"
+    log_info "Download complete: $(format_byte_size "$bytes_downloaded"), took $(format_duration_seconds "$elapsed"), avg $(format_byte_size "$average_speed")/s"
   fi
 }
 
@@ -976,6 +984,24 @@ shell_json_get_top_level_string() {
   ' "$json_file"
 }
 
+shell_json_get_top_level_bool() {
+  local json_file="$1"
+  local field="$2"
+  awk -v key="$field" '
+    $0 ~ ("^  \"" key "\"[[:space:]]*:") {
+      line = $0
+      sub("^  \"" key "\"[[:space:]]*:[[:space:]]*", "", line)
+      sub("[[:space:]]*,?[[:space:]]*$", "", line)
+      if (line == "true") {
+        print "true"
+      } else {
+        print "false"
+      }
+      exit
+    }
+  ' "$json_file"
+}
+
 shell_state_source_profile_count() {
   local state_file="$1"
   [[ -f "$state_file" ]] || {
@@ -997,14 +1023,14 @@ shell_state_source_profile_count() {
 
 ensure_release_only_shell_state() {
   local state_file="$1"
-  local feature="${2:-当前命令}"
+  local feature="${2:-current command}"
   local source_profile_count
 
   [[ -f "$state_file" ]] || return 0
   source_profile_count="$(shell_state_source_profile_count "$state_file")"
   [[ "$source_profile_count" == "0" ]] && return 0
 
-  die "${feature} 检测到现有状态包含源码条目；请先安装 python3 或 jq 后再执行。"
+  die "${feature} detected source profiles in the current state, but python3/jq is missing; cannot handle safely. Install python3 or jq and retry."
 }
 
 detect_installed_binary_version() {
@@ -1113,7 +1139,7 @@ resolve_release_direct() {
     done
   fi
 
-  [[ -n "$asset_name" ]] || die "未找到版本 ${requested} 对应的当前平台资产：${asset_candidates[*]}"
+  [[ -n "$asset_name" ]] || die "No release asset found for version ${requested} on this platform: ${asset_candidates[*]}"
 
   emit_release_descriptor_json \
     "$output_file" \
@@ -1174,7 +1200,7 @@ PY
     return
   fi
 
-  require_json_backend "release 列表解析"
+  require_json_backend "release list parsing"
   jq -cer \
     --arg requested "$requested" \
     --arg normalized "$normalized" \
@@ -1326,7 +1352,7 @@ PY
     return
   fi
 
-  require_json_backend "release 列表解析"
+  require_json_backend "release list parsing"
   jq -r 'if type == "array" then length else (if . then 1 else 0 end) end' "$json_file"
 }
 
@@ -1357,7 +1383,7 @@ PY
     return
   fi
 
-  require_json_backend "release 列表解析"
+  require_json_backend "release list parsing"
   jq -s '.[0] + .[1]' "$output_file" "$append_file" >"$temp_file"
   mv "$temp_file" "$output_file"
 }
@@ -1422,7 +1448,7 @@ PY
     return
   fi
 
-  require_json_backend "版本列表"
+  require_json_backend "version list"
   jq -r --args "$@" '
     def normalize_version(value):
       if value == null or value == "" then ""
@@ -1460,8 +1486,10 @@ write_state_file() {
   local hodexctl_wrapper="${10}"
   local path_update_mode="${11}"
   local path_profile="${12}"
-  local node_setup_choice="${13}"
-  local installed_at="${14}"
+  local path_managed_by_hodexctl="${13}"
+  local path_detected_source="${14}"
+  local node_setup_choice="${15}"
+  local installed_at="${16}"
 
   mkdir -p "$(dirname "$state_file")"
 
@@ -1480,6 +1508,8 @@ write_state_file() {
       "$hodexctl_wrapper" \
       "$path_update_mode" \
       "$path_profile" \
+      "$path_managed_by_hodexctl" \
+      "$path_detected_source" \
       "$node_setup_choice" \
       "$installed_at" <<'PY'
 import json
@@ -1499,6 +1529,8 @@ import sys
     hodexctl_wrapper,
     path_update_mode,
     path_profile,
+    path_managed_by_hodexctl,
+    path_detected_source,
     node_setup_choice,
     installed_at,
 ) = sys.argv[1:]
@@ -1516,6 +1548,8 @@ payload = {
     "wrappers_created": [hodex_wrapper, hodexctl_wrapper],
     "path_update_mode": path_update_mode,
     "path_profile": path_profile,
+    "path_managed_by_hodexctl": str(path_managed_by_hodexctl).lower() == "true",
+    "path_detected_source": path_detected_source,
     "node_setup_choice": node_setup_choice,
     "installed_at": installed_at,
 }
@@ -1554,7 +1588,7 @@ PY
   fi
 
   if [[ "$JSON_BACKEND" != "jq" ]]; then
-    ensure_release_only_shell_state "$state_file" "写入正式版安装状态"
+    ensure_release_only_shell_state "$state_file" "write release install state"
     {
       printf '{\n'
       printf '  "schema_version": 2,\n'
@@ -1572,6 +1606,8 @@ PY
       printf '  ],\n'
       printf '  "path_update_mode": %s,\n' "$(json_quote "$path_update_mode")"
       printf '  "path_profile": %s,\n' "$(json_quote "$path_profile")"
+      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$path_managed_by_hodexctl" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
+      printf '  "path_detected_source": %s,\n' "$(json_quote "$path_detected_source")"
       printf '  "node_setup_choice": %s,\n' "$(json_quote "$node_setup_choice")"
       printf '  "installed_at": %s,\n' "$(json_quote "$installed_at")"
       printf '  "source_profiles": {},\n'
@@ -1604,6 +1640,8 @@ PY
     --arg hodexctl_wrapper "$hodexctl_wrapper" \
     --arg path_update_mode "$path_update_mode" \
     --arg path_profile "$path_profile" \
+    --arg path_managed_by_hodexctl "$path_managed_by_hodexctl" \
+    --arg path_detected_source "$path_detected_source" \
     --arg node_setup_choice "$node_setup_choice" \
     --arg installed_at "$installed_at" \
     --slurpfile existing "$existing_file" \
@@ -1622,6 +1660,8 @@ PY
         wrappers_created: [$hodex_wrapper, $hodexctl_wrapper],
         path_update_mode: $path_update_mode,
         path_profile: $path_profile,
+        path_managed_by_hodexctl: ($path_managed_by_hodexctl == "true"),
+        path_detected_source: $path_detected_source,
         node_setup_choice: $node_setup_choice,
         installed_at: $installed_at,
         source_profiles: ($existing.source_profiles // {}),
@@ -1639,7 +1679,7 @@ PY
 
 load_state_env() {
   local state_file="$1"
-  [[ -f "$state_file" ]] || die "未找到状态文件: $state_file"
+  [[ -f "$state_file" ]] || die "State file not found: $state_file"
 
   if [[ "$JSON_BACKEND" == "python3" ]]; then
     eval "$(
@@ -1652,7 +1692,6 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
 mapping = {
-    "STATE_REPO": data.get("repo", ""),
     "STATE_INSTALLED_VERSION": data.get("installed_version", ""),
     "STATE_RELEASE_TAG": data.get("release_tag", ""),
     "STATE_RELEASE_NAME": data.get("release_name", ""),
@@ -1662,6 +1701,8 @@ mapping = {
     "STATE_COMMAND_DIR": data.get("command_dir", ""),
     "STATE_PATH_UPDATE_MODE": data.get("path_update_mode", ""),
     "STATE_PATH_PROFILE": data.get("path_profile", ""),
+    "STATE_PATH_MANAGED_BY_HODEXCTL": "true" if data.get("path_managed_by_hodexctl", False) else "false",
+    "STATE_PATH_DETECTED_SOURCE": data.get("path_detected_source", ""),
     "STATE_NODE_SETUP_CHOICE": data.get("node_setup_choice", ""),
     "STATE_INSTALLED_AT": data.get("installed_at", ""),
 }
@@ -1673,7 +1714,6 @@ PY
     eval "$(
       jq -r '
         [
-          "STATE_REPO=" + (.repo // "" | @sh),
           "STATE_INSTALLED_VERSION=" + (.installed_version // "" | @sh),
           "STATE_RELEASE_TAG=" + (.release_tag // "" | @sh),
           "STATE_RELEASE_NAME=" + (.release_name // "" | @sh),
@@ -1683,14 +1723,15 @@ PY
           "STATE_COMMAND_DIR=" + (.command_dir // "" | @sh),
           "STATE_PATH_UPDATE_MODE=" + (.path_update_mode // "" | @sh),
           "STATE_PATH_PROFILE=" + (.path_profile // "" | @sh),
+          "STATE_PATH_MANAGED_BY_HODEXCTL=" + (if (.path_managed_by_hodexctl // false) then "true" else "false" end | @sh),
+          "STATE_PATH_DETECTED_SOURCE=" + (.path_detected_source // "" | @sh),
           "STATE_NODE_SETUP_CHOICE=" + (.node_setup_choice // "" | @sh),
           "STATE_INSTALLED_AT=" + (.installed_at // "" | @sh)
         ] | .[]
       ' "$state_file"
     )"
   else
-    ensure_release_only_shell_state "$state_file" "读取安装状态"
-    STATE_REPO="$(shell_json_get_top_level_string "$state_file" "repo")"
+    ensure_release_only_shell_state "$state_file" "read install state"
     STATE_INSTALLED_VERSION="$(shell_json_get_top_level_string "$state_file" "installed_version")"
     STATE_RELEASE_TAG="$(shell_json_get_top_level_string "$state_file" "release_tag")"
     STATE_RELEASE_NAME="$(shell_json_get_top_level_string "$state_file" "release_name")"
@@ -1700,12 +1741,17 @@ PY
     STATE_COMMAND_DIR="$(shell_json_get_top_level_string "$state_file" "command_dir")"
     STATE_PATH_UPDATE_MODE="$(shell_json_get_top_level_string "$state_file" "path_update_mode")"
     STATE_PATH_PROFILE="$(shell_json_get_top_level_string "$state_file" "path_profile")"
+    STATE_PATH_MANAGED_BY_HODEXCTL="$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")"
+    STATE_PATH_DETECTED_SOURCE="$(shell_json_get_top_level_string "$state_file" "path_detected_source")"
     STATE_NODE_SETUP_CHOICE="$(shell_json_get_top_level_string "$state_file" "node_setup_choice")"
     STATE_INSTALLED_AT="$(shell_json_get_top_level_string "$state_file" "installed_at")"
   fi
 
   if [[ -z "$STATE_CONTROLLER_PATH" ]]; then
     STATE_CONTROLLER_PATH="$STATE_DIR/libexec/hodexctl.sh"
+  fi
+  if [[ -z "$STATE_PATH_MANAGED_BY_HODEXCTL" ]]; then
+    STATE_PATH_MANAGED_BY_HODEXCTL="false"
   fi
 }
 
@@ -1721,7 +1767,7 @@ prompt_yes_no() {
     esac
   fi
 
-  printf '当前等待确认输入，直接回车将采用默认值 %s。\n' "$default_answer"
+  printf 'Awaiting confirmation input; press Enter to accept default %s.\n' "$default_answer"
   printf '%s' "$prompt"
   read -r answer
   printf '\n'
@@ -1763,7 +1809,7 @@ PY
   fi
 
   if [[ "$JSON_BACKEND" != "jq" ]]; then
-    ensure_release_only_shell_state "$state_file" "读取当前 hodex 指向"
+    ensure_release_only_shell_state "$state_file" "read active hodex target"
     local active_alias
     active_alias="$(
       awk '
@@ -1875,7 +1921,7 @@ PY
   fi
 
   if [[ "$JSON_BACKEND" != "jq" ]]; then
-    ensure_release_only_shell_state "$state_file" "读取源码条目列表"
+    ensure_release_only_shell_state "$state_file" "read source profiles list"
     return 0
   fi
 
@@ -2143,15 +2189,17 @@ state_update_runtime_metadata() {
   local controller_path="$3"
   local path_update_mode="$4"
   local path_profile="$5"
+  local path_managed_by_hodexctl="$6"
+  local path_detected_source="$7"
 
   [[ -f "$state_file" ]] || return 0
 
   if [[ "$JSON_BACKEND" == "python3" ]]; then
-    python3 - "$state_file" "$command_dir" "$controller_path" "$path_update_mode" "$path_profile" <<'PY'
+    python3 - "$state_file" "$command_dir" "$controller_path" "$path_update_mode" "$path_profile" "$path_managed_by_hodexctl" "$path_detected_source" <<'PY'
 import json
 import sys
 
-state_file, command_dir, controller_path, path_update_mode, path_profile = sys.argv[1:6]
+state_file, command_dir, controller_path, path_update_mode, path_profile, path_managed_by_hodexctl, path_detected_source = sys.argv[1:8]
 
 with open(state_file, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
@@ -2160,6 +2208,8 @@ payload["command_dir"] = command_dir
 payload["controller_path"] = controller_path
 payload["path_update_mode"] = path_update_mode
 payload["path_profile"] = path_profile
+payload["path_managed_by_hodexctl"] = str(path_managed_by_hodexctl).lower() == "true"
+payload["path_detected_source"] = path_detected_source
 
 with open(state_file, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -2172,11 +2222,15 @@ PY
     --arg command_dir "$command_dir" \
     --arg controller_path "$controller_path" \
     --arg path_update_mode "$path_update_mode" \
-    --arg path_profile "$path_profile" '
+    --arg path_profile "$path_profile" \
+    --arg path_managed_by_hodexctl "$path_managed_by_hodexctl" \
+    --arg path_detected_source "$path_detected_source" '
     .command_dir = $command_dir
     | .controller_path = $controller_path
     | .path_update_mode = $path_update_mode
     | .path_profile = $path_profile
+    | .path_managed_by_hodexctl = ($path_managed_by_hodexctl == "true")
+    | .path_detected_source = $path_detected_source
   ' "$state_file" >"$state_file.tmp.$$"
   mv "$state_file.tmp.$$" "$state_file"
 }
@@ -2285,7 +2339,14 @@ PY
   fi
 
   if [[ "$JSON_BACKEND" != "jq" ]]; then
-    ensure_release_only_shell_state "$state_file" "清理正式版安装状态"
+    ensure_release_only_shell_state "$state_file" "clear release install state"
+    local controller_path command_dir path_update_mode path_profile path_managed_by_hodexctl path_detected_source
+    controller_path="$(shell_json_get_top_level_string "$state_file" "controller_path")"
+    command_dir="$(shell_json_get_top_level_string "$state_file" "command_dir")"
+    path_update_mode="$(shell_json_get_top_level_string "$state_file" "path_update_mode")"
+    path_profile="$(shell_json_get_top_level_string "$state_file" "path_profile")"
+    path_managed_by_hodexctl="$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")"
+    path_detected_source="$(shell_json_get_top_level_string "$state_file" "path_detected_source")"
     {
       printf '{\n'
       printf '  "schema_version": 2,\n'
@@ -2295,11 +2356,13 @@ PY
       printf '  "release_name": "",\n'
       printf '  "asset_name": "",\n'
       printf '  "binary_path": "",\n'
-      printf '  "controller_path": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "controller_path")")"
-      printf '  "command_dir": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "command_dir")")"
+      printf '  "controller_path": %s,\n' "$(json_quote "$controller_path")"
+      printf '  "command_dir": %s,\n' "$(json_quote "$command_dir")"
       printf '  "wrappers_created": [],\n'
-      printf '  "path_update_mode": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_update_mode")")"
-      printf '  "path_profile": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_profile")")"
+      printf '  "path_update_mode": %s,\n' "$(json_quote "$path_update_mode")"
+      printf '  "path_profile": %s,\n' "$(json_quote "$path_profile")"
+      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$path_managed_by_hodexctl" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
+      printf '  "path_detected_source": %s,\n' "$(json_quote "$path_detected_source")"
       printf '  "node_setup_choice": "",\n'
       printf '  "installed_at": "",\n'
       printf '  "source_profiles": {},\n'
@@ -2329,9 +2392,9 @@ PY
 
 ensure_dir_writable() {
   local dir="$1"
-  mkdir -p "$dir" || die "无法创建目录: $dir"
+  mkdir -p "$dir" || die "Failed to create directory: $dir"
   local probe="$dir/.hodex-write-test.$$"
-  : >"$probe" || die "目录不可写: $dir"
+  : >"$probe" || die "Directory not writable: $dir"
   rm -f "$probe"
 }
 
@@ -2358,12 +2421,12 @@ select_command_dir() {
   local choice custom_dir
   while true; do
     cat <<EOF
-请选择 hodex / hodexctl 的命令目录:
+Select command directory for hodex / hodexctl:
   1. $preferred_command_dir
   2. $STATE_DIR/bin
-  3. 自定义目录
+  3. Custom directory
 EOF
-    printf '输入选项 [1/2/3]: '
+    printf 'Enter choice [1/2/3]: '
     read -r choice
     case "$choice" in
       1)
@@ -2375,17 +2438,17 @@ EOF
         break
         ;;
       3)
-        printf '请输入安装目录: '
+        printf 'Enter install directory: '
         read -r custom_dir
         [[ -n "$custom_dir" ]] || {
-          log_warn "目录不能为空。"
+          log_warn "Directory cannot be empty."
           continue
         }
         COMMAND_DIR="$(normalize_user_path "$custom_dir")"
         break
         ;;
       *)
-        log_warn "请输入 1、2 或 3。"
+        log_warn "Please enter 1, 2, or 3."
         ;;
     esac
   done
@@ -2464,6 +2527,37 @@ any_path_block_present() {
   return 1
 }
 
+profile_file_has_command_dir_evidence() {
+  local profile_file="$1"
+  local target="$2"
+  [[ -f "$profile_file" ]] || return 1
+
+  if grep -F -- "$target" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ "$target" == "$(normalize_user_path "$HOME/.local/bin")" ]]; then
+    if grep -E '(^|[[:space:]])(\.|source)[[:space:]]+["'"'"']?(\$HOME|~)/\.local/bin/env["'"'"']?' "$profile_file" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+any_profile_has_command_dir_evidence() {
+  local target="$1"
+  shift
+  local profile_file
+  for profile_file in "$@"; do
+    [[ -n "$profile_file" ]] || continue
+    if profile_file_has_command_dir_evidence "$profile_file" "$target"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 is_path_segment_present() {
   local path_value="$1"
   local target="$2"
@@ -2490,9 +2584,12 @@ write_path_block() {
 update_path_if_needed() {
   PATH_UPDATE_MODE="skipped"
   PATH_PROFILE=""
+  PATH_MANAGED_BY_HODEXCTL="false"
+  PATH_DETECTED_SOURCE=""
 
   if ((NO_PATH_UPDATE)); then
     PATH_UPDATE_MODE="disabled"
+    PATH_DETECTED_SOURCE="disabled"
     return
   fi
 
@@ -2512,23 +2609,41 @@ update_path_if_needed() {
     done
     PATH_PROFILE="$profile_file"
     PATH_UPDATE_MODE="configured"
+    PATH_MANAGED_BY_HODEXCTL="true"
+    PATH_DETECTED_SOURCE="managed-profile-block"
     if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
       export PATH="$COMMAND_DIR:$PATH"
     fi
     return
   fi
 
-  if is_path_segment_present "$PATH" "$COMMAND_DIR"; then
-    PATH_UPDATE_MODE="already"
+  if any_profile_has_command_dir_evidence "$COMMAND_DIR" "${profile_targets[@]-}"; then
+    PATH_PROFILE="$profile_file"
+    PATH_DETECTED_SOURCE="preexisting-profile"
+    if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
+      export PATH="$COMMAND_DIR:$PATH"
+      PATH_UPDATE_MODE="configured"
+    else
+      PATH_UPDATE_MODE="already"
+    fi
     return
+  fi
+
+  PATH_PROFILE="$profile_file"
+  if is_path_segment_present "$PATH" "$COMMAND_DIR"; then
+    PATH_DETECTED_SOURCE="current-process-only"
   fi
 
   local should_update=1
   if ((AUTO_YES)); then
     should_update=0
   else
-    printf '%s\n' "当前目录 $COMMAND_DIR 不在 PATH 中。"
-    printf '是否自动写入 PATH？[Y/n]: '
+    if [[ "$PATH_DETECTED_SOURCE" == "current-process-only" ]]; then
+      printf '%s\n' "Command directory $COMMAND_DIR is only on PATH for this session; no persistent config was found."
+    else
+      printf '%s\n' "Command directory $COMMAND_DIR is not on PATH."
+    fi
+    printf 'Add to PATH automatically? [Y/n]: '
     local answer
     read -r answer
     case "${answer:-Y}" in
@@ -2543,6 +2658,9 @@ update_path_if_needed() {
 
   if ((should_update)); then
     PATH_UPDATE_MODE="user-skipped"
+    if [[ -z "$PATH_DETECTED_SOURCE" ]]; then
+      PATH_DETECTED_SOURCE="user-skipped"
+    fi
     return
   fi
 
@@ -2554,6 +2672,8 @@ update_path_if_needed() {
   done
   PATH_PROFILE="$profile_file"
   PATH_UPDATE_MODE="added"
+  PATH_MANAGED_BY_HODEXCTL="true"
+  PATH_DETECTED_SOURCE="managed-profile-block"
 
   if ! is_path_segment_present "$PATH" "$COMMAND_DIR"; then
     export PATH="$COMMAND_DIR:$PATH"
@@ -2582,6 +2702,52 @@ remove_path_blocks_for_targets() {
   done < <(path_profile_targets "$primary_profile")
 }
 
+profile_file_has_path_block() {
+  local profile_file="$1"
+  [[ -f "$profile_file" ]] || return 1
+  if grep -F "$PATH_BLOCK_START" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  if grep -F "$LEGACY_PATH_BLOCK_START" "$profile_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+cleanup_path_blocks_for_uninstall() {
+  local primary_profile="$1"
+  local -a candidates=()
+  local target cleaned=0 seen_key="|"
+
+  if [[ -n "$primary_profile" ]]; then
+    candidates+=("$primary_profile")
+  fi
+
+  candidates+=(
+    "$HOME/.zprofile"
+    "$HOME/.zshrc"
+    "$HOME/.bash_profile"
+    "$HOME/.bashrc"
+    "$HOME/.profile"
+  )
+
+  for target in "${candidates[@]-}"; do
+    [[ -n "$target" ]] || continue
+    case "$seen_key" in
+      *"|$target|"*) continue ;;
+      *) seen_key="${seen_key}${target}|" ;;
+    esac
+    if profile_file_has_path_block "$target"; then
+      remove_path_block "$target"
+      cleaned=1
+    fi
+  done
+
+  if ((cleaned)); then
+    log_info "Removed managed PATH blocks."
+  fi
+}
+
 generate_hodex_wrapper() {
   local wrapper_path="$1"
   local binary_path="$2"
@@ -2589,7 +2755,7 @@ generate_hodex_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ! -x "$binary_path" ]]; then
-  echo "hodex 二进制不存在，请先运行 hodexctl install。" >&2
+  echo "hodex binary is missing; run hodexctl install first." >&2
   exit 1
 fi
 exec "$binary_path" "\$@"
@@ -2605,7 +2771,7 @@ generate_runtime_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ! -x "$binary_path" ]]; then
-  echo "${command_name} 对应的二进制不存在，请重新运行 hodexctl 安装或重编译。" >&2
+  echo "${command_name} binary is missing; rerun hodexctl install or rebuild." >&2
   exit 1
 fi
 exec "$binary_path" "\$@"
@@ -2616,14 +2782,16 @@ EOF
 generate_hodexctl_wrapper() {
   local wrapper_path="$1"
   local controller_path="$2"
+  local state_dir="$3"
   cat >"$wrapper_path" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ! -f "$controller_path" ]]; then
-  echo "hodexctl 管理脚本不存在，请重新安装。" >&2
+  echo "hodexctl manager script copy is missing; reinstall hodexctl." >&2
   exit 1
 fi
 export HODEX_DISPLAY_NAME="hodexctl"
+export HODEX_STATE_DIR="$state_dir"
 if [[ "\$#" -eq 0 ]]; then
   exec "$controller_path" help
 fi
@@ -2648,9 +2816,9 @@ sync_controller_copy() {
     return
   fi
 
-  local raw_url="${CONTROLLER_URL_BASE}/${REPO}/main/scripts/hodexctl/hodexctl.sh"
-  log_step "下载 hodexctl 管理脚本"
-  download_binary "$raw_url" "$target_path" "下载 hodexctl.sh"
+  local raw_url="${CONTROLLER_URL_BASE}/${REPO}/${CONTROLLER_REF}/scripts/hodexctl/hodexctl.sh"
+  log_step "Download hodexctl manager script"
+  download_binary "$raw_url" "$target_path" "Downloading hodexctl.sh"
   chmod 0755 "$target_path"
 }
 
@@ -2669,17 +2837,17 @@ resolve_release() {
 
   if [[ "$requested" == "latest" ]]; then
     http_get_to_file "https://api.github.com/repos/${REPO}/releases/latest" "$temp_json" \
-      || die "$(github_api_fetch_failure_message "获取 latest release 失败，请检查仓库名、GitHub API 限流或网络状态")"
+      || die "$(github_api_fetch_failure_message "Failed to fetch latest release; check repo, GitHub API rate limits, or network.")"
     mv "$temp_json" "$output_file"
     return
   fi
 
   http_get_to_file "https://api.github.com/repos/${REPO}/releases?per_page=100" "$temp_json" \
-    || die "$(github_api_fetch_failure_message "获取 release 列表失败，请检查仓库名、GitHub API 限流或网络状态")"
+    || die "$(github_api_fetch_failure_message "Failed to fetch release list; check repo, GitHub API rate limits, or network.")"
 
   if ! json_select_release "$temp_json" "$requested" "$output_file"; then
     rm -f "$temp_json"
-    die "未找到版本 $requested 对应的 release。"
+    die "Release not found for version $requested."
   fi
 
   rm -f "$temp_json"
@@ -2690,7 +2858,7 @@ fetch_all_releases() {
   local page=1
   local page_file count
 
-  require_json_backend "版本列表"
+  require_json_backend "version list"
 
   printf '[]\n' >"$output_file"
 
@@ -2698,7 +2866,7 @@ fetch_all_releases() {
     page_file="$(mktemp)"
     if ! http_get_to_file "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${page}" "$page_file"; then
       rm -f "$page_file"
-      die "$(github_api_fetch_failure_message "获取 release 列表失败，请检查仓库名、GitHub API 限流或网络状态")"
+      die "$(github_api_fetch_failure_message "Failed to fetch release list; check repo, GitHub API rate limits, or network.")"
     fi
 
     count="$(json_array_length "$page_file")"
@@ -2739,20 +2907,20 @@ verify_digest_if_present() {
   local download_path="$1"
   local asset_digest="$2"
   if [[ -z "$asset_digest" ]]; then
-    log_warn "release 未提供 digest，跳过 SHA-256 校验。"
+    log_warn "Release did not provide a digest; skipping SHA-256 verification."
     return
   fi
   if [[ "$asset_digest" != sha256:* ]]; then
-    log_warn "暂不支持的 digest 格式: $asset_digest"
+    log_warn "Unsupported digest format: $asset_digest"
     return
   fi
 
   local expected actual
   expected="${asset_digest#sha256:}"
   actual="$(compute_sha256 "$download_path")"
-  [[ -n "$actual" ]] || die "当前环境没有可用的 SHA-256 计算命令。"
-  [[ "$actual" == "$expected" ]] || die "SHA-256 校验失败。期望 $expected，实际 $actual"
-  log_step "SHA-256 校验通过: $actual"
+  [[ -n "$actual" ]] || die "No available SHA-256 verification command in this environment."
+  [[ "$actual" == "$expected" ]] || die "SHA-256 verification failed: expected $expected, got $actual"
+  log_step "SHA-256 verified: $actual"
 }
 
 fetch_matching_release_lines() {
@@ -2795,19 +2963,19 @@ build_release_details_text() {
 
   asset_name="$(json_find_asset_info "$release_file" "${asset_candidates[@]}" | awk -F '\t' 'NR==1 {print $1}')"
 
-  output="版本: ${selected_version}
+  output="Version: ${selected_version}
 Release: ${release_name:-<unknown>} (${release_tag:-<unknown>})
-发布时间: ${published_at:-<unknown>}
-当前平台资产: ${asset_name:-<unknown>}
-页面: ${html_url:-<unknown>}
+Published: ${published_at:-<unknown>}
+Asset: ${asset_name:-<unknown>}
+Page: ${html_url:-<unknown>}
 
-更新日志:
+Changelog:
 "
 
   if [[ -n "$body" ]]; then
     output+="$body"
   else
-    output+="<该版本未提供更新日志>"
+    output+="<No changelog provided for this release>"
   fi
 
   printf '%s' "$output"
@@ -2825,32 +2993,32 @@ build_release_summary_prompt() {
   body="$(json_get_field "$release_file" "body")"
 
   if [[ -z "$body" ]]; then
-    body="<该版本未提供更新日志>"
+    body="<No changelog provided for this release>"
   fi
 
   cat <<EOF
-请基于下面这个 Hodex release 的完整 changelog，输出一份简体中文总结。
+Please summarize the full changelog for the Hodex release below in English.
 
-输出要求：
-1. 只输出最终总结，不要输出思考过程、分析过程、草稿、自我说明或额外前言。
-2. 必须优先按类别做结构化总结，能归类就归类；推荐分类顺序为：
-   - 新增功能
-   - 改进优化
-   - 修复内容
-   - 破坏性变更 / 迁移要求
-   - 其他说明
-3. 没有内容的类别可以省略；不要为了凑分类编造内容。
-4. 每个类别下用简短要点列出关键信息，优先覆盖用户最关心的变化。
-5. 如果存在破坏性变更、兼容性影响、配置变更、需要手动处理的步骤，必须单独明确指出。
-6. 不要遗漏重要信息，不要编造日志中不存在的内容。
-7. 直接开始输出中文总结正文，不要再写“以下是总结”等前言。
+Requirements:
+1. Output only the final summary. Do not include analysis, reasoning, drafts, or extra preface.
+2. Organize the summary by category. Recommended order:
+   - New features
+   - Improvements
+   - Fixes
+   - Breaking changes / migration
+   - Other notes
+3. Omit empty categories and do not invent content.
+4. Use concise bullet points for each category, prioritizing the most important changes.
+5. If there are breaking changes, compatibility impacts, config changes, or manual steps, call them out explicitly.
+6. Do not omit important information or invent content not in the changelog.
+7. Start directly with the summary content. Do not add a "Summary" preface.
 
-版本: ${selected_version}
+Version: ${selected_version}
 Release: ${release_name:-<unknown>} (${release_tag:-<unknown>})
-发布时间: ${published_at:-<unknown>}
-页面: ${html_url:-<unknown>}
+Published: ${published_at:-<unknown>}
+Page: ${html_url:-<unknown>}
 
-完整 changelog:
+Full changelog:
 ${body}
 EOF
 }
@@ -2871,7 +3039,7 @@ agent_supports_exec() {
 
 pause_after_release_summary() {
   if [[ -t 0 && -t 1 ]]; then
-    printf '\n按回车返回版本详情...'
+    printf '\nPress Enter to return to release details...'
     read -r _
   fi
 }
@@ -2981,14 +3149,14 @@ run_release_summary_with_agent() {
   local stderr_file exit_code=0
 
   stderr_file="$(mktemp)"
-  printf 'AI 总结生成中，请稍候...\n\n'
+  printf 'Generating AI summary, please wait...\n\n'
   if "$agent_command" exec --skip-git-repo-check --color never --json - <"$prompt_file" 2>"$stderr_file" | parse_release_summary_json_stream; then
     exit_code=0
   else
     exit_code=$?
   fi
   if ((exit_code != 0)); then
-    log_warn "${agent_command} 执行失败：$(retry_error_summary "$stderr_file")"
+    log_warn "${agent_command} failed: $(retry_error_summary "$stderr_file")"
   fi
   rm -f "$stderr_file"
   return "$exit_code"
@@ -3007,7 +3175,7 @@ summarize_release_changelog() {
 
   if ((${#candidates[@]} == 0)); then
     clear_screen_if_interactive
-    log_warn "未找到可用的 hodex/codex 命令，无法自动总结 changelog。"
+    log_warn "No available hodex/codex command; cannot summarize the changelog automatically."
     pause_after_release_summary
     return 1
   fi
@@ -3023,7 +3191,7 @@ summarize_release_changelog() {
 
     clear_screen_if_interactive
     if ((used_fallback)); then
-      log_warn "首选命令不可用，已自动改用 ${candidate}。"
+      log_warn "Preferred command unavailable; switched to ${candidate}."
       printf '\n'
     fi
 
@@ -3035,13 +3203,13 @@ summarize_release_changelog() {
 
     used_fallback=1
     printf '\n'
-    log_warn "${candidate} 总结 changelog 失败，准备尝试下一个可用命令。"
+    log_warn "${candidate} failed to summarize the changelog; trying the next available command."
     printf '\n'
   done
 
   rm -f "$prompt_file"
   clear_screen_if_interactive
-  log_warn "当前找到的 hodex/codex 都无法执行 changelog 总结。"
+  log_warn "All available hodex/codex commands failed to summarize the changelog."
   pause_after_release_summary
   return 1
 }
@@ -3073,13 +3241,13 @@ render_release_details_page() {
   fi
 
   printf '\033[H\033[2J'
-  printf '%s版本详情%s %s\n' "$header_style" "$reset_style" "$selected_version"
-  local ai_hint="a AI总结"
+  printf '%sRelease details%s %s\n' "$header_style" "$reset_style" "$selected_version"
+  local ai_hint="an AI summary"
   if ((COLOR_ENABLED)); then
-    ai_hint="${COLOR_ALERT} AI总结(A) ${COLOR_RESET}${hint_style}"
+    ai_hint="${COLOR_ALERT} AI summary (A) ${COLOR_RESET}${hint_style}"
   fi
-  printf '%sEnter/Space下一页  ↑↓单行滚动  ←→整页滚动  %s  i安装  d下载  b返回  q退出%s\n' "$hint_style" "$ai_hint" "$reset_style"
-  printf '%s第 %d/%d 页 | 第 %d-%d / %d 行 | A=AI总结(hodex/codex)%s\n\n' "$status_style" "$current_page" "$total_pages" "$start_line" "$end_line" "$total_lines" "$reset_style"
+  printf '%sEnter/Space next page  ↑↓ scroll line  ←→ scroll page  %s  i install  d download  b back  q quit%s\n' "$hint_style" "$ai_hint" "$reset_style"
+  printf '%sPage %d/%d | Lines %d-%d / %d | A=AI summary (hodex/codex)%s\n\n' "$status_style" "$current_page" "$total_pages" "$start_line" "$end_line" "$total_lines" "$reset_style"
   sed -n "${start_line},${end_line}p" "$detail_file"
 }
 
@@ -3087,7 +3255,7 @@ print_release_details() {
   local release_file="$1"
   local selected_version="$2"
   local details_text detail_file total_lines rows page_size start_line
-  local key key2 key3 key4
+  local key key2 key3
 
   details_text="$(build_release_details_text "$release_file" "$selected_version")"
 
@@ -3184,14 +3352,14 @@ print_release_details() {
                   fi
                   ;;
                 5)
-                  IFS= read -rsn1 key4 || true
+                  IFS= read -rsn1 _ || true
                   start_line=$((start_line - page_size))
                   if ((start_line < 1)); then
                     start_line=1
                   fi
                   ;;
                 6)
-                  IFS= read -rsn1 key4 || true
+                  IFS= read -rsn1 _ || true
                   start_line=$((start_line + page_size))
                   if ((start_line > total_lines)); then
                     start_line=$total_lines
@@ -3226,7 +3394,7 @@ perform_download() {
   asset_line="$(json_find_asset_info "$release_file" "${asset_candidates[@]}")" \
     || {
       rm -f "$release_file"
-      die "release 未找到匹配当前平台的资产：${asset_candidates[*]}"
+      die "No matching release asset found for this platform: ${asset_candidates[*]}"
     }
   IFS=$'\t' read -r asset_name asset_url asset_digest <<<"$asset_line"
 
@@ -3236,25 +3404,25 @@ perform_download() {
 
   if [[ -f "$output_path" && -t 0 ]]; then
     local overwrite
-    printf '目标文件已存在，是否覆盖？[Y/n]: '
+    printf 'Target file already exists. Overwrite? [Y/n]: '
     read -r overwrite
     case "${overwrite:-Y}" in
       n | N | no | NO)
         rm -f "$release_file"
-        log_info "已取消下载。"
+        log_info "Download canceled."
         return 0
         ;;
     esac
   fi
 
-  log_step "下载 Hodex 资产"
-  log_step "命中 release: ${release_name:-<unknown>} (${release_tag:-<unknown>})"
-  log_step "下载资产: $asset_name"
-  log_step "保存路径: $output_path"
-  download_binary "$asset_url" "$output_path" "下载 $asset_name"
+  log_step "Download Hodex asset"
+  log_step "Matched release: ${release_name:-<unknown>} (${release_tag:-<unknown>})"
+  log_step "Download asset: $asset_name"
+  log_step "Save path: $output_path"
+  download_binary "$asset_url" "$output_path" "Downloading $asset_name"
   chmod 0755 "$output_path"
   verify_digest_if_present "$output_path" "$asset_digest"
-  log_info "已下载到: $output_path"
+  log_info "Downloaded to: $output_path"
   rm -f "$release_file"
 }
 
@@ -3280,7 +3448,7 @@ extract_version_from_release_line() {
 source_entry_matches_query() {
   local query="$1"
   [[ -z "$query" ]] && return 0
-  printf '%s\n' '源码下载 管理 source sync dev fork branch git toolchain checkout' | grep -Fqi -- "$query"
+  printf '%s\n' 'source download manage sync dev fork branch git toolchain checkout' | grep -Fqi -- "$query"
 }
 
 build_filtered_release_indices() {
@@ -3391,15 +3559,15 @@ render_release_status_bar() {
 
   entry_index="${filtered_indices[$cursor]}"
   if ((entry_index < 0)); then
-    summary="选中 源码下载 / 管理 | 支持 fork / 分支切换 / 工具链检查 / checkout 管理"
+    summary="Selected source download / manage | supports fork, branch switch, toolchain check, checkout management"
   else
     line="${release_lines[$entry_index]}"
     IFS=$'\t' read -r selected_version release_tag release_name published_at asset_name asset_url asset_digest html_url <<<"$line"
     marker=""
     if [[ -n "$current_version" && "$selected_version" == "$current_version" ]]; then
-      marker=" | 已安装"
+      marker=" | installed"
     fi
-    summary="选中 ${selected_version} | ${published_at:-<unknown>} | ${asset_name}${marker}"
+    summary="Selected ${selected_version} | ${published_at:-<unknown>} | ${asset_name}${marker}"
   fi
   separator="$(printf '%*s' "$cols" '' | tr ' ' '-')"
 
@@ -3415,30 +3583,30 @@ render_release_status_bar() {
 show_release_help_popup() {
   printf '\033[H\033[2J'
   if ((COLOR_ENABLED)); then
-    printf '%s%s快捷键帮助%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+    printf '%s%sKeyboard shortcuts%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
   else
-    printf '快捷键帮助\n\n'
+    printf 'Keyboard shortcuts\n\n'
   fi
-  printf '  ↑ / ↓    移动当前选中版本\n'
-  printf '  ← / →    翻页\n'
-  printf '  n / p    下一页 / 上一页\n'
-  printf '  /        进入实时搜索，输入即过滤\n'
-  printf '  0        进入源码下载 / 管理\n'
-  printf '  Enter    查看当前版本更新日志\n'
-  printf '  ?        显示本帮助\n'
-  printf '  q        退出版本选择器\n'
+  printf '  ↑ / ↓    Move selection\n'
+  printf '  ← / →    Page\n'
+  printf '  n / p    Next / previous page\n'
+  printf '  /        Search (type to filter)\n'
+  printf '  0        Enter source download / manage\n'
+  printf '  Enter    View changelog\n'
+  printf '  ?        Show this help\n'
+  printf '  q        Quit selector\n'
   printf '\n'
-  printf '更新日志页操作：\n'
+  printf 'Changelog view:\n'
   if ((COLOR_ENABLED)); then
-    printf '  %sA / a  AI总结%s  调用 hodex/codex 对当前 changelog 做 AI 总结\n' "$COLOR_ALERT" "$COLOR_RESET"
+    printf '  %sA / a  AI summary%s  Summarize current changelog with hodex/codex\n' "$COLOR_ALERT" "$COLOR_RESET"
   else
-    printf '  A / a    AI总结    调用 hodex/codex 对当前 changelog 做 AI 总结\n'
+    printf '  A / a    AI summary    Summarize current changelog with hodex/codex\n'
   fi
-  printf '  i        安装当前版本\n'
-  printf '  d        下载当前平台资产到 %s\n' "$DOWNLOAD_DIR"
-  printf '  b        返回版本列表\n'
-  printf '  q        退出\n'
-  printf '\n按任意键返回列表...'
+  printf '  i        Install selected version\n'
+  printf '  d        Download current platform asset to %s\n' "$DOWNLOAD_DIR"
+  printf '  b        Back to list\n'
+  printf '  q        Quit\n'
+  printf '\nPress any key to return to the list...'
   IFS= read -rsn1 _
 }
 
@@ -3470,19 +3638,19 @@ render_release_selector() {
     reset_style="${COLOR_RESET}"
   fi
 
-  search_display="${query:-<全部>}"
+  search_display="${query:-<all>}"
   if ((search_mode)); then
     search_display="${query}_"
   fi
 
   printf '\033[H\033[2J'
-  printf '%sHodex 版本选择器%s (%s)\n' "$header_style" "$reset_style" "$PLATFORM_LABEL"
-  printf '%s上下键移动  Enter查看日志/源码菜单  /实时搜索  n下一页  p上一页  左右翻页  0源码菜单  ?帮助  q退出%s\n' "$hint_style" "$reset_style"
-  printf '%s搜索%s: %s\n' "$hint_style" "$reset_style" "$search_display"
+  printf '%sHodex version selector%s (%s)\n' "$header_style" "$reset_style" "$PLATFORM_LABEL"
+  printf '%sUp/Down move  Enter view changelog/source menu  /search  n next  p prev  ←→ page  0 source menu  ? help  q quit%s\n' "$hint_style" "$reset_style"
+  printf '%sSearch%s: %s\n' "$hint_style" "$reset_style" "$search_display"
 
   total=${#filtered_indices[@]}
   if ((total == 0)); then
-    printf '没有匹配版本。\n'
+    printf 'No matching versions.\n'
     if [[ -n "$status_message" ]]; then
       printf '\n%s%s%s\n' "$status_style" "$status_message" "$reset_style"
     fi
@@ -3497,7 +3665,7 @@ render_release_selector() {
     page_end=$total
   fi
 
-  printf '匹配 %d 个，第 %d/%d 页\n\n' "$total" "$page_number" "$page_count"
+  printf 'Matched %d, page %d/%d\n\n' "$total" "$page_number" "$page_count"
 
   for ((idx = page_start; idx < page_end; idx++)); do
     entry_index="${filtered_indices[$idx]}"
@@ -3507,9 +3675,9 @@ render_release_selector() {
         prefix="> "
       fi
       if ((idx == cursor)) && ((COLOR_ENABLED)); then
-        printf '%s%s%3s. %-12s %s%s\n' "$selected_style" "$prefix" "0" "源码模式" "源码下载 / 管理" "$reset_style"
+        printf '%s%s%3s. %-12s %s%s\n' "$selected_style" "$prefix" "0" "Source mode" "Source download / manage" "$reset_style"
       else
-        printf '%s%3s. %-12s %s\n' "$prefix" "0" "源码模式" "源码下载 / 管理"
+        printf '%s%3s. %-12s %s\n' "$prefix" "0" "Source mode" "Source download / manage"
       fi
       continue
     fi
@@ -3519,9 +3687,9 @@ render_release_selector() {
     marker=""
     if [[ -n "$current_version" && "$selected_version" == "$current_version" ]]; then
       if ((COLOR_ENABLED)); then
-        marker=" ${installed_style}[已安装]${reset_style}"
+        marker=" ${installed_style}[installed]${reset_style}"
       else
-        marker=" [已安装]"
+        marker=" [installed]"
       fi
     fi
 
@@ -3563,7 +3731,7 @@ prompt_release_search() {
   local key
 
   search_mode=1
-  status_message="实时搜索中：输入即过滤，Enter 确认，Esc 取消，Backspace 删除。"
+  status_message="Search mode: type to filter, Enter to confirm, Esc to cancel, Backspace to delete."
 
   while true; do
     render_release_selector
@@ -3587,7 +3755,7 @@ prompt_release_search() {
         page_start="$original_page_start"
         build_filtered_release_indices
         sync_release_cursor
-        status_message="已取消搜索。"
+        status_message="Search canceled."
         persist_current_release_selection
         return 1
         ;;
@@ -3621,7 +3789,7 @@ show_release_actions() {
     case "$action_rc" in
       10)
         rm -f "$release_file"
-        perform_install_like "${release_tag:-$selected_version}" "安装"
+        perform_install_like "${release_tag:-$selected_version}" "Install"
         return 10
         ;;
       11)
@@ -3645,7 +3813,7 @@ show_release_actions() {
 }
 
 perform_list() {
-  local releases_file selected choice line idx key key2 key3
+  local releases_file choice line idx key key2 key3
   local current_version=""
   local -a release_lines=()
   local -a filtered_indices=()
@@ -3653,7 +3821,7 @@ perform_list() {
   local query="" status_message="" cursor=0 page_start=0 page_size=10 action_rc
   local search_mode=0
 
-  require_json_backend "版本列表"
+  require_json_backend "version list"
   releases_file="$(mktemp)"
   fetch_all_releases "$releases_file"
 
@@ -3664,7 +3832,7 @@ perform_list() {
   rm -f "$releases_file"
 
   if ((${#release_lines[@]} == 0)); then
-    die "当前平台没有可用的 release 资产。"
+    die "No release assets available for this platform."
   fi
 
   if [[ -f "$STATE_DIR/state.json" ]]; then
@@ -3673,8 +3841,8 @@ perform_list() {
   fi
 
   if [[ ! -t 0 || ! -t 1 ]]; then
-    printf '当前平台可下载版本: %s\n' "$PLATFORM_LABEL"
-    printf '%3s. %-12s %s\n' "0" "源码模式" "源码下载 / 管理"
+    printf 'Available versions for this platform: %s\n' "$PLATFORM_LABEL"
+    printf '%3s. %-12s %s\n' "0" "Source mode" "Source download/management"
     idx=1
     for line in "${release_lines[@]}"; do
       IFS=$'\t' read -r selected_version release_tag release_name published_at asset_name asset_url asset_digest html_url <<<"$line"
@@ -3697,7 +3865,7 @@ perform_list() {
     case "$key" in
       "")
         if ((${#filtered_indices[@]} == 0)); then
-          status_message="当前搜索没有匹配项。"
+          status_message="No matches for the current search."
           continue
         fi
         if ((${filtered_indices[$cursor]} < 0)); then
@@ -3717,13 +3885,13 @@ perform_list() {
               load_state_env "$STATE_DIR/state.json"
               current_version="$STATE_INSTALLED_VERSION"
             fi
-            status_message="安装完成，当前版本: ${current_version:-<unknown>}"
+            status_message="Install complete, current version: ${current_version:-<unknown>}"
             build_filtered_release_indices
             sync_release_cursor
             persist_current_release_selection
             ;;
           11)
-            status_message="下载完成，目标目录: $(normalize_user_path "$DOWNLOAD_DIR")"
+            status_message="Download complete, target dir: $(normalize_user_path "$DOWNLOAD_DIR")"
             persist_current_release_selection
             ;;
           20)
@@ -3834,30 +4002,30 @@ prompt_node_choice() {
 
   if [[ "$NODE_MODE" == "ask" && -n "$previous_choice" ]]; then
     NODE_SETUP_CHOICE="$previous_choice"
-    log_info "当前未安装 Node.js，沿用既有记录: $previous_choice"
+    log_info "Node.js not detected; reusing previous choice: $previous_choice"
     return
   fi
 
   if [[ "$NODE_MODE" == "ask" && $AUTO_YES -eq 1 ]]; then
     NODE_SETUP_CHOICE="skip"
-    log_warn "检测到未安装 Node.js；非交互模式默认跳过。"
+    log_warn "Node.js not detected; non-interactive mode defaults to skip."
     return
   fi
 
   local effective_mode="$NODE_MODE"
   if [[ "$effective_mode" == "ask" ]]; then
     cat <<EOF
-检测到当前系统未安装 Node.js，可选处理方式:
-  1. 系统方式安装
+Node.js is not installed. Choose an option:
+  1. System install
      - macOS: Homebrew
      - Linux/WSL: apt / dnf / yum / pacman / zypper
-  2. 使用 nvm
-  3. 手动下载安装（官网链接）
-  4. 跳过
+  2. Use nvm
+  3. Manual install (official download)
+  4. Skip
 EOF
     local answer
     while true; do
-      printf '请选择 [1/2/3/4]: '
+      printf 'Choose [1/2/3/4]: '
       read -r answer
       case "$answer" in
         1)
@@ -3877,7 +4045,7 @@ EOF
           break
           ;;
         *)
-          log_warn "请输入 1、2、3 或 4。"
+          log_warn "Please enter 1, 2, 3, or 4."
           ;;
       esac
     done
@@ -3886,10 +4054,10 @@ EOF
   NODE_SETUP_CHOICE="$effective_mode"
   case "$effective_mode" in
     skip)
-      log_info "已跳过 Node.js 环境处理。"
+      log_info "Skipped Node.js setup."
       ;;
     manual)
-      log_info "请手动安装 Node.js：$NODE_DOWNLOAD_URL"
+      log_info "Install Node.js manually: $NODE_DOWNLOAD_URL"
       ;;
     native)
       install_node_native
@@ -3902,11 +4070,11 @@ EOF
 
 validate_source_profile_name() {
   local profile_name="$1"
-  [[ -n "$profile_name" ]] || die "源码记录名不能为空。"
-  [[ "$profile_name" =~ ^[A-Za-z0-9._-]+$ ]] || die "源码记录名仅支持字母、数字、点、下划线和连字符。"
+  [[ -n "$profile_name" ]] || die "Source profile name cannot be empty."
+  [[ "$profile_name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Source profile name may only include letters, numbers, dots, underscores, and hyphens."
   case "$profile_name" in
     hodex | hodexctl | hodex-stable)
-      die "源码记录名不能使用保留名称: $profile_name"
+      die "Source profile name cannot use reserved name: $profile_name"
       ;;
   esac
 }
@@ -3941,7 +4109,7 @@ resolve_source_repo_input() {
   fi
 
   local answer
-  printf '请输入源码仓库（owner/repo 或 Git URL，默认 %s）: ' "$DEFAULT_REPO"
+  printf 'Enter source repo (owner/repo or Git URL, default %s): ' "$DEFAULT_REPO"
   read -r answer
   answer="${answer:-$DEFAULT_REPO}"
   if [[ "$answer" == *"://"* || "$answer" == git@*:* ]]; then
@@ -4002,7 +4170,7 @@ print_choice_candidates() {
   local idx=1
   local value
   [[ ${#CHOICE_CANDIDATES[@]} -gt 0 ]] || return 0
-  printf '  可选项:\n'
+  printf '  Candidates:\n'
   for value in "${CHOICE_CANDIDATES[@]-}"; do
     printf '    %d. %s\n' "$idx" "$value"
     idx=$((idx + 1))
@@ -4040,16 +4208,16 @@ render_choice_candidates_page() {
 
   clear_screen_if_interactive
   printf '%s\n' "$label" >&2
-  printf '  默认值: %s\n' "$default_value" >&2
-  [[ -z "$note" ]] || printf '  备注: %s\n' "$note" >&2
-  printf '  输入当前页编号可直接选择，也可直接输入自定义值\n' >&2
-  printf '  n/p 翻页，/关键词 过滤，c 清空过滤\n' >&2
+  printf '  Default: %s\n' "$default_value" >&2
+  [[ -z "$note" ]] || printf '  Note: %s\n' "$note" >&2
+  printf '  Enter a number from this page, or type a custom value\n' >&2
+  printf '  n/p page, / filter, c clear filter\n' >&2
   if [[ -n "$query" ]]; then
-    printf '  当前过滤: %s\n' "$query" >&2
+    printf '  Current filter: %s\n' "$query" >&2
   fi
 
   if ((total == 0)); then
-    printf '  当前过滤无匹配候选\n' >&2
+    printf '  No candidates match the current filter\n' >&2
     printf '> ' >&2
     return 0
   fi
@@ -4060,7 +4228,7 @@ render_choice_candidates_page() {
   fi
   page_count=$(((total + page_size - 1) / page_size))
   page_number=$((page_start / page_size + 1))
-  printf '  候选项: 第 %d/%d 页，共 %d 项\n' "$page_number" "$page_count" "$total" >&2
+  printf '  Candidates: page %d/%d, total %d\n' "$page_number" "$page_count" "$total" >&2
   for ((idx = page_start; idx < page_end; idx++)); do
     visible_index=$((idx - page_start + 1))
     value="${CHOICE_FILTERED_CANDIDATES[$idx]}"
@@ -4132,7 +4300,7 @@ prompt_value_with_choice_candidates() {
           printf '%s\n' "${CHOICE_FILTERED_CANDIDATES[$((page_start + answer - 1))]}"
           return 0
         fi
-        log_warn "请输入当前页范围内的编号。"
+        log_warn "Enter a number within the current page."
         continue
       fi
 
@@ -4143,10 +4311,10 @@ prompt_value_with_choice_candidates() {
 
   while true; do
     printf '%s\n' "$label" >&2
-    printf '  默认值: %s\n' "$default_value" >&2
-    [[ -z "$note" ]] || printf '  备注: %s\n' "$note" >&2
+    printf '  Default: %s\n' "$default_value" >&2
+    [[ -z "$note" ]] || printf '  Note: %s\n' "$note" >&2
     print_choice_candidates >&2
-    printf '  输入编号可直接选择，也可直接输入自定义值\n' >&2
+    printf '  Enter a number to select, or type a custom value\n' >&2
     printf '> ' >&2
     read -r answer
 
@@ -4161,7 +4329,7 @@ prompt_value_with_choice_candidates() {
         printf '%s\n' "${CHOICE_CANDIDATES[$choice_index]}"
         return 0
       fi
-      log_warn "编号超出范围，请重新输入。"
+      log_warn "Number out of range; please try again."
       continue
     fi
 
@@ -4182,13 +4350,13 @@ derive_source_profile_suggestion() {
 
 emit_source_repo_candidates() {
   local state_file="${1:-}"
-  local profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
 
   printf '%s\n' "$DEFAULT_REPO"
   printf 'https://github.com/%s.git\n' "$DEFAULT_REPO"
 
   [[ -f "$state_file" ]] || return 0
-  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$repo_input" ]] && printf '%s\n' "$repo_input"
     if [[ -n "$remote_url" && "$remote_url" != "https://github.com/${repo_input}.git" ]]; then
       printf '%s\n' "$remote_url"
@@ -4199,14 +4367,14 @@ emit_source_repo_candidates() {
 emit_source_profile_candidates() {
   local repo_input="$1"
   local state_file="${2:-}"
-  local suggested profile_name repo_value remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local suggested profile_name repo_value remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
 
   printf '%s\n' "$DEFAULT_SOURCE_PROFILE_NAME"
   suggested="$(derive_source_profile_suggestion "$repo_input")"
   [[ -n "$suggested" ]] && printf '%s\n' "$suggested"
 
   [[ -f "$state_file" ]] || return 0
-  while IFS=$'\t' read -r profile_name repo_value remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_value remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$profile_name" ]] && printf '%s\n' "$profile_name"
   done < <(state_emit_source_profiles "$state_file")
 }
@@ -4234,7 +4402,7 @@ emit_source_ref_candidates() {
   local state_file="${2:-}"
   local current_source_profile="${3:-}"
   local checkout_dir="${4:-}"
-  local profile_name repo_value remote_url profile_checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local profile_name repo_value remote_url workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
 
   printf '%s\n' "${SOURCE_REF:-$DEFAULT_SOURCE_REF}"
   printf '%s\n' "$DEFAULT_SOURCE_REF"
@@ -4244,7 +4412,7 @@ emit_source_ref_candidates() {
   emit_git_checkout_ref_candidates "$checkout_dir"
 
   [[ -f "$state_file" ]] || return 0
-  while IFS=$'\t' read -r profile_name repo_value remote_url profile_checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_value remote_url _ workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$current_ref" ]] || continue
     if [[ -n "$current_source_profile" && "$profile_name" == "$current_source_profile" ]]; then
       printf '%s\n' "$current_ref"
@@ -4258,13 +4426,13 @@ emit_source_checkout_candidates() {
   local remote_url="$1"
   local default_checkout="$2"
   local state_file="${3:-}"
-  local profile_name repo_value existing_remote checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local profile_name repo_value existing_remote checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
 
   printf '%s\n' "$default_checkout"
   printf '%s\n' "$HOME/hodex-src"
 
   [[ -f "$state_file" ]] || return 0
-  while IFS=$'\t' read -r profile_name repo_value existing_remote checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_value existing_remote checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$checkout_dir" ]] || continue
     if [[ -n "$remote_url" && "$existing_remote" == "$remote_url" ]]; then
       printf '%s\n' "$checkout_dir"
@@ -4284,7 +4452,7 @@ prompt_source_ref_with_candidates() {
   while IFS= read -r candidate; do
     append_choice_candidate "$candidate"
   done < <(emit_source_ref_candidates "$repo_input" "$state_file" "$profile_name" "$checkout_dir")
-  prompt_value_with_choice_candidates '目标 ref（branch / tag / commit）' "$default_ref" '候选项默认只展示 branch；标签或 commit 可直接输入'
+  prompt_value_with_choice_candidates 'Target ref (branch / tag / commit)' "$default_ref" 'Candidates show branches by default; tags or commits can be entered directly'
 }
 
 resolve_source_checkout_dir() {
@@ -4312,7 +4480,7 @@ resolve_source_checkout_dir() {
   fi
 
   local answer
-  printf '源码 checkout 目录 [%s]: ' "$default_dir"
+  printf 'Source checkout directory [%s]: ' "$default_dir"
   read -r answer
   if [[ -z "$answer" ]]; then
     printf '%s\n' "$default_dir"
@@ -4341,28 +4509,28 @@ run_source_install_wizard() {
   while true; do
     printf '\033[H\033[2J'
     if ((COLOR_ENABLED)); then
-      printf '%s%s源码下载向导%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
-      printf '%s将按顺序确认仓库、源码记录名、ref 和 checkout 目录。%s\n' "$COLOR_HINT" "$COLOR_RESET"
-      printf '%s直接回车表示接受默认值；源码模式仅下载/同步源码，不再编译。%s\n' "$COLOR_HINT" "$COLOR_RESET"
-      printf '%s步骤 1/4%s 仓库\n\n' "$COLOR_STATUS" "$COLOR_RESET"
+      printf '%s%sSource download wizard%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+      printf '%sYou will confirm repo, source profile, ref, and checkout directory in order.%s\n' "$COLOR_HINT" "$COLOR_RESET"
+      printf '%sPress Enter to accept defaults; source mode only downloads/syncs and does not build.%s\n' "$COLOR_HINT" "$COLOR_RESET"
+      printf '%sStep 1/4%s Repo\n\n' "$COLOR_STATUS" "$COLOR_RESET"
     else
-      printf '源码下载向导\n\n'
-      printf '将按顺序确认仓库、源码记录名、ref 和 checkout 目录。\n'
-      printf '直接回车表示接受默认值；源码模式仅下载/同步源码，不再编译。\n'
-      printf '步骤 1/4 仓库\n\n'
+      printf 'Source download wizard\n\n'
+      printf 'You will confirm repo, source profile, ref, and checkout directory in order.\n'
+      printf 'Press Enter to accept defaults; source mode only downloads/syncs and does not build.\n'
+      printf 'Step 1/4 Repo\n\n'
     fi
 
     reset_choice_candidates
     while IFS= read -r repo_answer; do
       append_choice_candidate "$repo_answer"
     done < <(emit_source_repo_candidates "$state_file")
-    repo_answer="$(prompt_value_with_choice_candidates '源码仓库（owner/repo 或 Git URL）' "$DEFAULT_REPO")"
+    repo_answer="$(prompt_value_with_choice_candidates 'Source repo (owner/repo or Git URL)' "$DEFAULT_REPO")"
 
     while true; do
       if ((COLOR_ENABLED)); then
-        printf '\n%s步骤 2/4%s 源码记录名\n' "$COLOR_STATUS" "$COLOR_RESET"
+        printf '\n%sStep 2/4%s Source profile name\n' "$COLOR_STATUS" "$COLOR_RESET"
       else
-        printf '\n步骤 2/4 源码记录名\n'
+        printf '\nStep 2/4 Source profile name\n'
       fi
       reset_choice_candidates
       while IFS= read -r name_answer; do
@@ -4370,20 +4538,20 @@ run_source_install_wizard() {
       done < <(emit_source_profile_candidates "$repo_answer" "$state_file")
       name_answer="$(
         prompt_value_with_choice_candidates \
-          '源码记录名' \
+          'Source profile name' \
           "$DEFAULT_SOURCE_PROFILE_NAME" \
-          '这是源码记录名/工作区标识，不是命令名'
+          'This is a source profile/workspace identifier, not a command name'
       )"
       if validate_source_profile_name "$name_answer" >/dev/null 2>&1; then
         break
       fi
-      log_warn "源码记录名不能使用保留名称。"
+      log_warn "Source profile name cannot use reserved names."
     done
 
     if ((COLOR_ENABLED)); then
-      printf '\n%s步骤 3/4%s ref\n' "$COLOR_STATUS" "$COLOR_RESET"
+      printf '\n%sStep 3/4%s Ref\n' "$COLOR_STATUS" "$COLOR_RESET"
     else
-      printf '\n步骤 3/4 ref\n'
+      printf '\nStep 3/4 Ref\n'
     fi
     remote_url="$(source_repo_input_to_remote_url "$repo_answer")"
     default_checkout="$(default_source_checkout_dir "$remote_url")"
@@ -4391,35 +4559,35 @@ run_source_install_wizard() {
     while IFS= read -r ref_answer; do
       append_choice_candidate "$ref_answer"
     done < <(emit_source_ref_candidates "$repo_answer" "$state_file" "$name_answer" "$default_checkout")
-    ref_answer="$(prompt_value_with_choice_candidates '源码 ref（branch / tag / commit）' "$DEFAULT_SOURCE_REF" '候选项默认只展示 branch；标签或 commit 可直接输入')"
+    ref_answer="$(prompt_value_with_choice_candidates 'Source ref (branch / tag / commit)' "$DEFAULT_SOURCE_REF" 'Candidates show branches by default; tags or commits can be entered directly')"
 
     if ((COLOR_ENABLED)); then
-      printf '\n%s步骤 4/4%s checkout\n' "$COLOR_STATUS" "$COLOR_RESET"
-      printf '%s默认会把源码 checkout 放到受管源码目录，便于后续 update / switch 复用。%s\n' "$COLOR_HINT" "$COLOR_RESET"
+      printf '\n%sStep 4/4%s Checkout\n' "$COLOR_STATUS" "$COLOR_RESET"
+      printf '%sDefault checkout goes to the managed source directory for reuse by update/switch.%s\n' "$COLOR_HINT" "$COLOR_RESET"
     else
-      printf '\n步骤 4/4 checkout\n'
-      printf '默认会把源码 checkout 放到受管源码目录，便于后续 update / switch 复用。\n'
+      printf '\nStep 4/4 Checkout\n'
+      printf 'Default checkout goes to the managed source directory for reuse by update/switch.\n'
     fi
     reset_choice_candidates
     while IFS= read -r checkout_answer; do
       append_choice_candidate "$checkout_answer"
     done < <(emit_source_checkout_candidates "$remote_url" "$default_checkout" "$state_file")
-    checkout_answer="$(prompt_value_with_choice_candidates '源码 checkout 目录' "$default_checkout")"
+    checkout_answer="$(prompt_value_with_choice_candidates 'Source checkout directory' "$default_checkout")"
     checkout_answer="$(normalize_user_path "$checkout_answer")"
 
     printf '\n'
     if ((COLOR_ENABLED)); then
-      printf '%s%s向导摘要%s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+      printf '%s%sWizard Summary%s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
     else
-      printf '向导摘要\n'
+      printf 'Wizard Summary\n'
     fi
-    printf '  仓库: %s\n' "$repo_answer"
-    printf '  源码记录名: %s\n' "$name_answer"
+    printf '  Repo: %s\n' "$repo_answer"
+    printf '  Source profile: %s\n' "$name_answer"
     printf '  ref: %s\n' "$ref_answer"
     printf '  checkout: %s\n' "$checkout_answer"
 
-    printf '\n即将进入确认步骤。\n'
-    if prompt_yes_no "确认使用以上配置继续下载？[Y/n]: " "Y"; then
+    printf '\nProceeding to confirmation.\n'
+    if prompt_yes_no "Continue with this configuration? [Y/n]: " "Y"; then
       if [[ "$repo_answer" == *"://"* || "$repo_answer" == git@*:* ]]; then
         SOURCE_GIT_URL="$repo_answer"
       else
@@ -4432,8 +4600,8 @@ run_source_install_wizard() {
       return 0
     fi
 
-    if ! prompt_yes_no "是否重新填写源码下载向导？[Y/n]: " "Y"; then
-      log_info "已取消。"
+    if ! prompt_yes_no "Redo the source download wizard? [Y/n]: " "Y"; then
+      log_info "Canceled."
       return 1
     fi
   done
@@ -4443,25 +4611,25 @@ render_source_profile_selector() {
   local current_index="$1"
   shift
   local -a lines=("$@")
-  local idx selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex prefix style reset_style separator cols
+  local idx selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at prefix style reset_style separator cols
 
   printf '\033[H\033[2J'
   if ((COLOR_ENABLED)); then
-    printf '%s%s选择源码条目%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
-    printf '%s共 %d 个源码条目；默认优先定位 %s，否则落到第一项。%s\n' "$COLOR_HINT" "${#lines[@]}" "$DEFAULT_SOURCE_PROFILE_NAME" "$COLOR_RESET"
-    printf '%s上下键移动  Enter 确认  q 取消%s\n\n' "$COLOR_HINT" "$COLOR_RESET"
+    printf '%s%sSelect source profile%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+    printf '%sTotal %d profiles; default prefers %s, otherwise the first.%s\n' "$COLOR_HINT" "${#lines[@]}" "$DEFAULT_SOURCE_PROFILE_NAME" "$COLOR_RESET"
+    printf '%sUp/Down move  Enter confirm  q cancel%s\n\n' "$COLOR_HINT" "$COLOR_RESET"
     style="${COLOR_SELECTED}${COLOR_BOLD}"
     reset_style="$COLOR_RESET"
   else
-    printf '选择源码条目\n\n'
-    printf '共 %d 个源码条目；默认优先定位 %s，否则落到第一项。\n' "${#lines[@]}" "$DEFAULT_SOURCE_PROFILE_NAME"
-    printf '上下键移动  Enter 确认  q 取消\n\n'
+    printf 'Select source profile\n\n'
+    printf 'Total %d profiles; default prefers %s, otherwise the first.\n' "${#lines[@]}" "$DEFAULT_SOURCE_PROFILE_NAME"
+    printf 'Up/Down move  Enter confirm  q cancel\n\n'
     style=""
     reset_style=""
   fi
 
   for ((idx = 0; idx < ${#lines[@]}; idx++)); do
-    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex <<<"${lines[$idx]}"
+    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _ <<<"${lines[$idx]}"
     prefix="  "
     if ((idx == current_index)); then
       prefix="> "
@@ -4477,37 +4645,40 @@ render_source_profile_selector() {
 
   cols="$(tput cols 2>/dev/null || printf '80')"
   separator="$(printf '%*s' "$cols" '' | tr ' ' '-')"
-  IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex <<<"${lines[$current_index]}"
+  IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _ <<<"${lines[$current_index]}"
   printf '\n'
   if ((COLOR_ENABLED)); then
     printf '%s%s%s\n' "$COLOR_DIM" "$separator" "$COLOR_RESET"
-    printf '%s选中摘要%s: %s | ref=%s | checkout=%s\n' "$COLOR_DIM" "$COLOR_RESET" "$selected_name" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
+    printf '%sSelected summary%s: %s | ref=%s | checkout=%s\n' "$COLOR_DIM" "$COLOR_RESET" "$selected_name" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
   else
     printf '%s\n' "$separator"
-    printf '选中摘要: %s | ref=%s | checkout=%s\n' "$selected_name" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
+    printf 'Selected summary: %s | ref=%s | checkout=%s\n' "$selected_name" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
   fi
 }
 
 classify_source_error() {
   local message="$1"
   case "$message" in
-    *"工具链"* | *"缺失"* | *"rustup"* | *"cargo"* | *"rustc"* | *"xcode-clt"* | *"msvc-build-tools"*)
-      printf '工具链问题\n'
+    *"msvc-build-tools"*)
+      printf 'Toolchain issue\n'
       ;;
-    *"Git 仓库"* | *"远端"* | *"clone"* | *"git"* | *"checkout"* | *"未提交修改"*)
-      printf 'Git / 源码目录问题\n'
+    *"cargo build"* | *"build"* | *"compile"* | *"artifact"*)
+      printf 'Build issue\n'
+      ;;
+    *"toolchain"* | *"missing"* | *"rustup"* | *"cargo"* | *"rustc"* | *"xcode-clt"*)
+      printf 'Toolchain issue\n'
+      ;;
+    *"Git repository"* | *"remote"* | *"clone"* | *"git"* | *"checkout"* | *"uncommitted changes"*)
+      printf 'Git / source directory issue\n'
       ;;
     *"ref"* | *"branch"* | *"tag"* | *"commit"*)
-      printf '目标 ref 问题\n'
+      printf 'Target ref issue\n'
       ;;
-    *"构建"* | *"编译"* | *"产物"* | *"cargo build"*)
-      printf '构建问题\n'
-      ;;
-    *"名称"* | *"保留名称"* | *"-dev"* | *"参数"* )
-      printf '输入参数问题\n'
+    *"name"* | *"reserved"* | *"-dev"* | *"argument"* )
+      printf 'Input parameter issue\n'
       ;;
     *)
-      printf '未分类问题\n'
+      printf 'Uncategorized issue\n'
       ;;
   esac
 }
@@ -4522,14 +4693,14 @@ print_source_result_summary() {
 
   printf '\n'
   if ((COLOR_ENABLED)); then
-    printf '%s%s结果摘要%s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+    printf '%s%sResult summary%s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
   else
-    printf '结果摘要\n'
+    printf 'Result summary\n'
   fi
-  printf '  动作: %s\n' "$action_label"
-  printf '  源码记录名: %s\n' "$profile_name"
+  printf '  Action: %s\n' "$action_label"
+  printf '  Source profile: %s\n' "$profile_name"
   if [[ -n "$ref_name" ]]; then
-    printf '  当前 ref: %s\n' "$ref_name"
+    printf '  Current ref: %s\n' "$ref_name"
   fi
   if [[ -n "$checkout_dir" ]]; then
     printf '  checkout: %s\n' "$checkout_dir"
@@ -4539,7 +4710,7 @@ print_source_result_summary() {
 print_source_menu_action_preview() {
   local choice="$1"
   local state_file="$STATE_DIR/state.json"
-  local preview_name preview_repo preview_remote preview_checkout preview_binary preview_wrapper
+  local preview_name preview_repo preview_remote preview_checkout
   local source_count="0"
 
   if [[ -f "$state_file" ]]; then
@@ -4556,39 +4727,39 @@ print_source_menu_action_preview() {
       fi
       preview_remote="$(source_repo_input_to_remote_url "$preview_repo")"
       preview_checkout="${SOURCE_CHECKOUT_DIR:-$(default_source_checkout_dir "$preview_remote")}"
-      printf '  默认仓库: %s\n' "$preview_repo"
-      printf '  默认源码记录名: %s\n' "$preview_name"
-      printf '  默认 ref: %s\n' "${SOURCE_REF:-$DEFAULT_SOURCE_REF}"
-      printf '  默认 checkout: %s\n' "$preview_checkout"
-      printf '  执行内容: clone/fetch、工具链检查、登记源码记录\n'
+      printf '  Default repo: %s\n' "$preview_repo"
+      printf '  Default source profile: %s\n' "$preview_name"
+      printf '  Default ref: %s\n' "${SOURCE_REF:-$DEFAULT_SOURCE_REF}"
+      printf '  Default checkout: %s\n' "$preview_checkout"
+      printf '  Actions: clone/fetch, toolchain check, register source profile\n'
       ;;
     2)
-      printf '  默认对象: 单个源码条目自动选中；多个源码条目进入选择器\n'
-      printf '  执行内容: fetch 最新代码、切回当前 ref、同步 checkout\n'
-      printf '  保留规则: 只管理源码目录和工具链，不影响 hodex release\n'
+      printf '  Default target: single profile auto-selected; multiple profiles open selector\n'
+      printf '  Actions: fetch latest code, checkout current ref, sync checkout\n'
+      printf '  Keep rule: manage only source directory and toolchain; does not affect hodex release\n'
       ;;
     3)
-      printf '  默认对象: 单个源码条目自动选中；多个源码条目进入选择器\n'
-      printf '  目标 ref: %s\n' "${SOURCE_REF:-$DEFAULT_SOURCE_REF}"
-      printf '  执行内容: 先确认新的 branch/tag/commit，再切换并同步源码\n'
-      printf '  安全限制: checkout 存在未提交修改时会拒绝切换\n'
+      printf '  Default target: single profile auto-selected; multiple profiles open selector\n'
+      printf '  Target ref: %s\n' "${SOURCE_REF:-$DEFAULT_SOURCE_REF}"
+      printf '  Actions: confirm new branch/tag/commit, then switch and sync source\n'
+      printf '  Safety: refuse to switch if checkout has uncommitted changes\n'
       ;;
     4)
-      printf '  当前版本已移除源码编译能力。\n'
-      printf '  如需最新源码，请使用“更新源码”或“切换 ref”。\n'
+      printf '  Source build capability has been removed in this version.\n'
+      printf '  For latest source, use "Update source" or "Switch ref".\n'
       ;;
     5)
-      printf '  默认对象: 单个源码条目自动展示详情；多个源码条目展示摘要列表\n'
-      printf '  展示内容: 仓库、ref、checkout、工作区、最近同步时间\n'
+      printf '  Default target: single profile shows details; multiple profiles show summary list\n'
+      printf '  Shows: repo, ref, checkout, workspace, last sync time\n'
       ;;
     6)
-      printf '  默认对象: 单个源码条目自动选中；多个源码条目进入选择器\n'
-      printf '  删除内容: 源码条目记录，可选删除 checkout\n'
-      printf '  最后清理: 如果这是最后一个 runtime，会连同 hodexctl 和受管 PATH 一起清理\n'
+      printf '  Default target: single profile auto-selected; multiple profiles open selector\n'
+      printf '  Removes: source profile record; optional checkout removal\n'
+      printf '  Final cleanup: if this is the last runtime, also removes hodexctl and managed PATH\n'
       ;;
     7)
-      printf '  展示内容: 所有源码条目的仓库、ref、checkout 摘要\n'
-      printf '  当前已记录: %s 个\n' "$source_count"
+      printf '  Shows: summary of repo/ref/checkout for all source profiles\n'
+      printf '  Currently recorded: %s\n' "$source_count"
       ;;
   esac
 }
@@ -4637,16 +4808,16 @@ select_existing_source_profile_name() {
   local state_file="$1"
   local preferred_name="${2:-$DEFAULT_SOURCE_PROFILE_NAME}"
   local -a lines=()
-  local line index choice selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local line index choice selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
 
   while IFS= read -r line; do
     [[ -n "$line" ]] && lines+=("$line")
   done < <(state_emit_source_profiles "$state_file")
 
-  ((${#lines[@]} > 0)) || die "未检测到源码记录，请先执行 hodexctl source install。"
+  ((${#lines[@]} > 0)) || die "No source profiles found. Run 'hodexctl source install' first."
 
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex <<<"$line"
+    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _ <<<"$line"
     if [[ "$selected_name" == "$preferred_name" ]]; then
       printf '%s\n' "$selected_name"
       return 0
@@ -4662,7 +4833,7 @@ select_existing_source_profile_name() {
   if [[ -t 0 && -t 1 ]]; then
     local cursor=0 key key2
     for ((index = 0; index < ${#lines[@]}; index++)); do
-      IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex <<<"${lines[$index]}"
+      IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _ <<<"${lines[$index]}"
       if [[ "$selected_name" == "$preferred_name" ]]; then
         cursor=$index
         break
@@ -4678,7 +4849,7 @@ select_existing_source_profile_name() {
           return 0
           ;;
         q | Q)
-          die "已取消选择源码条目。"
+          die "Source profile selection canceled."
           ;;
         $'\033')
           if IFS= read -rsn2 key2; then
@@ -4698,19 +4869,19 @@ select_existing_source_profile_name() {
     done
   fi
 
-  printf '\n请选择源码条目:\n'
+  printf '\nSelect a source profile:\n'
   index=1
   for line in "${lines[@]}"; do
-    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex <<<"$line"
+    IFS=$'\t' read -r selected_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _ <<<"$line"
     printf '  %d. %s | %s | %s\n' "$index" "$selected_name" "${current_ref:-<unknown>}" "${repo_input:-<unknown>}"
     index=$((index + 1))
   done
 
   while true; do
-    printf '输入编号选择源码条目 [1-%d]: ' "${#lines[@]}"
+    printf 'Enter a number to select a source profile [1-%d]: ' "${#lines[@]}"
     read -r choice
     [[ "$choice" =~ ^[0-9]+$ ]] || {
-      log_warn "请输入有效编号。"
+      log_warn "Please enter a valid number."
       continue
     }
     if ((choice >= 1 && choice <= ${#lines[@]})); then
@@ -4718,7 +4889,7 @@ select_existing_source_profile_name() {
       printf '%s\n' "$selected_name"
       return 0
     fi
-    log_warn "请输入 1-${#lines[@]} 之间的编号。"
+    log_warn "Please enter a number between 1 and ${#lines[@]}."
   done
 }
 
@@ -4738,7 +4909,7 @@ resolve_source_profile_name() {
 
   if [[ -z "$SOURCE_PROFILE" ]] && ! ((AUTO_YES)); then
     local answer
-    printf '源码记录名 [%s]: ' "$DEFAULT_SOURCE_PROFILE_NAME"
+    printf 'Source profile name [%s]: ' "$DEFAULT_SOURCE_PROFILE_NAME"
     read -r answer
     default_name="${answer:-$DEFAULT_SOURCE_PROFILE_NAME}"
   fi
@@ -4763,45 +4934,45 @@ confirm_source_action_plan() {
 
   printf '\n'
   if ((COLOR_ENABLED)); then
-    printf '%s%s即将执行%s: %s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET" "$action_label"
+    printf '%s%sAbout to run%s: %s\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET" "$action_label"
     printf '%s  profile%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "$profile_name"
-    printf '%s  仓库%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "${repo_input:-<unknown>}"
+    printf '%s  repo%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "${repo_input:-<unknown>}"
     printf '%s  checkout%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "${checkout_dir:-<unknown>}"
     printf '%s  ref%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "${ref_name:-<unknown>}"
     if [[ -n "$current_ref_value" && "$current_ref_value" != "$ref_name" ]]; then
-      printf '%s  当前 -> 目标 ref%s: %s -> %s\n' "$COLOR_HINT" "$COLOR_RESET" "$current_ref_value" "$ref_name"
+      printf '%s  current -> target ref%s: %s -> %s\n' "$COLOR_HINT" "$COLOR_RESET" "$current_ref_value" "$ref_name"
     fi
     if [[ -n "$current_checkout_value" && "$current_checkout_value" != "$checkout_dir" ]]; then
-      printf '%s  当前 -> 目标 checkout%s: %s -> %s\n' "$COLOR_HINT" "$COLOR_RESET" "$current_checkout_value" "$checkout_dir"
+      printf '%s  current -> target checkout%s: %s -> %s\n' "$COLOR_HINT" "$COLOR_RESET" "$current_checkout_value" "$checkout_dir"
     fi
     if [[ -n "$checkout_mode_preview" ]]; then
-      printf '%s  checkout 策略%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "$checkout_mode_preview"
+      printf '%s  checkout strategy%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "$checkout_mode_preview"
     fi
     if [[ -n "$extra_hint" ]]; then
-      printf '%s  说明%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "$extra_hint"
+      printf '%s  note%s: %s\n' "$COLOR_HINT" "$COLOR_RESET" "$extra_hint"
     fi
   else
-    printf '即将执行: %s\n' "$action_label"
-    printf '  源码记录名: %s\n' "$profile_name"
-    printf '  仓库: %s\n' "${repo_input:-<unknown>}"
+    printf 'About to run: %s\n' "$action_label"
+    printf '  source profile: %s\n' "$profile_name"
+    printf '  repo: %s\n' "${repo_input:-<unknown>}"
     printf '  checkout: %s\n' "${checkout_dir:-<unknown>}"
     printf '  ref: %s\n' "${ref_name:-<unknown>}"
     if [[ -n "$current_ref_value" && "$current_ref_value" != "$ref_name" ]]; then
-      printf '  当前 -> 目标 ref: %s -> %s\n' "$current_ref_value" "$ref_name"
+      printf '  current -> target ref: %s -> %s\n' "$current_ref_value" "$ref_name"
     fi
     if [[ -n "$current_checkout_value" && "$current_checkout_value" != "$checkout_dir" ]]; then
-      printf '  当前 -> 目标 checkout: %s -> %s\n' "$current_checkout_value" "$checkout_dir"
+      printf '  current -> target checkout: %s -> %s\n' "$current_checkout_value" "$checkout_dir"
     fi
     if [[ -n "$checkout_mode_preview" ]]; then
-      printf '  checkout 策略: %s\n' "$checkout_mode_preview"
+      printf '  checkout strategy: %s\n' "$checkout_mode_preview"
     fi
     if [[ -n "$extra_hint" ]]; then
-      printf '  说明: %s\n' "$extra_hint"
+      printf '  note: %s\n' "$extra_hint"
     fi
   fi
 
-  prompt_yes_no "确认继续？[Y/n]: " "Y" || {
-    log_info "已取消。"
+  prompt_yes_no "Continue? [Y/n]: " "Y" || {
+    log_info "Canceled."
     return 1
   }
 }
@@ -4811,23 +4982,21 @@ ensure_git_worktree_clean() {
   local status_output
 
   status_output="$(git -C "$checkout_dir" status --porcelain --untracked-files=no 2>/dev/null || true)"
-  [[ -z "$status_output" ]] || die "源码目录存在未提交修改，请先提交或清理后再切换/更新: $checkout_dir"
+  [[ -z "$status_output" ]] || die "Source checkout has uncommitted changes. Commit or clean before switching/updating: $checkout_dir"
 }
 
 summarize_git_fetch_output() {
   local output_file="$1"
-  local remote_line line has_summary=0
+  local remote_line line
 
   remote_line="$(grep -E '^From ' "$output_file" | head -n 1 || true)"
   [[ -n "$remote_line" ]] && {
     printf '%s\n' "$remote_line" >&2
-    has_summary=1
   }
 
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     printf '%s\n' "$line" >&2
-    has_summary=1
   done < <(grep -E '\[(new tag|tag update|new branch)\]' "$output_file" || true)
 
   return 0
@@ -4916,9 +5085,9 @@ detect_source_ref_kind() {
   local checkout_dir="$1"
   local ref_name="$2"
 
-  [[ -d "$checkout_dir/.git" ]] || die "源码目录不存在或不是 Git 仓库: $checkout_dir"
+  [[ -d "$checkout_dir/.git" ]] || die "Source checkout does not exist or is not a Git repo: $checkout_dir"
   run_with_retry "git-fetch" git_fetch_with_summary "$checkout_dir" \
-    || die "同步源码远端失败: $checkout_dir"
+    || die "Failed to sync source remote: $checkout_dir"
 
   if git -C "$checkout_dir" show-ref --verify --quiet "refs/remotes/origin/${ref_name}"; then
     printf 'branch\n'
@@ -4937,7 +5106,7 @@ detect_source_ref_kind() {
     return
   fi
 
-  die "未找到可用的 ref: $ref_name"
+  die "No matching ref found: $ref_name"
 }
 
 switch_source_checkout_to_ref() {
@@ -4964,7 +5133,7 @@ switch_source_checkout_to_ref() {
       git_checkout_with_summary "$checkout_dir" checkout "$ref_name"
       ;;
     *)
-      die "未知的源码 ref 类型: $ref_kind"
+      die "Unknown source ref type: $ref_kind"
       ;;
   esac
 }
@@ -4981,7 +5150,7 @@ detect_source_workspace_root() {
     return
   fi
 
-  die "未识别到可支持的源码构建入口（缺少 codex-rs/Cargo.toml 或 Cargo.toml）。"
+  die "No supported source build entry found (missing codex-rs/Cargo.toml or Cargo.toml)."
 }
 
 detect_source_build_strategy() {
@@ -4989,7 +5158,7 @@ detect_source_build_strategy() {
   local metadata_file
   metadata_file="$(mktemp)"
   run_with_retry "cargo-metadata" cargo metadata --format-version 1 --no-deps --manifest-path "$workspace_root/Cargo.toml" >"$metadata_file" \
-    || die "读取 cargo metadata 失败: $workspace_root"
+    || die "Failed to read cargo metadata: $workspace_root"
 
   if [[ "$JSON_BACKEND" == "python3" ]]; then
     python3 - "$metadata_file" <<'PY'
@@ -5086,7 +5255,7 @@ def find_root_package_id(payload, build_mode, build_target):
             for target in package.get("targets", []):
                 if target.get("name") == build_target and "bin" in (target.get("kind") or []):
                     return package["id"]
-    raise SystemExit("未找到源码构建目标对应的 Cargo package。")
+    raise SystemExit("No Cargo package found for the source build target.")
 
 
 def collect_reachable_package_ids(payload, root_package_id):
@@ -5159,7 +5328,7 @@ def render_progress(completed, total, started_at, current_label, fresh_count, fi
     if fresh_count > 0:
         status += f" fresh={fresh_count}"
     label_width = max(columns - len(status) - 12, 12)
-    label = truncate_label(current_label or "等待 Cargo 事件", label_width)
+    label = truncate_label(current_label or "Waiting for Cargo events", label_width)
     sys.stderr.write("\r" + status + " | " + label + " " * 4)
     sys.stderr.flush()
     if final:
@@ -5186,7 +5355,7 @@ def main():
     else:
         cargo_args.extend(["--bin", build_target])
 
-    print(f"编译进度预估: {total_units} 个编译单元", flush=True)
+    print(f"Estimated compile progress: {total_units} compilation units", flush=True)
     process = subprocess.Popen(
         cargo_args,
         stdout=subprocess.PIPE,
@@ -5200,7 +5369,7 @@ def main():
     fresh_count = 0
     seen = set()
     started_at = time.time()
-    render_progress(0, total_units, started_at, "准备构建图", 0)
+    render_progress(0, total_units, started_at, "Preparing build graph", 0)
 
     assert process.stdout is not None
     for raw_line in process.stdout:
@@ -5235,17 +5404,17 @@ def main():
                     sys.stderr.write("\n")
                     sys.stderr.flush()
                     print(rendered, end="" if rendered.endswith("\n") else "\n", flush=True)
-                    render_progress(completed, total_units, started_at, message.get("message") or "编译消息", fresh_count)
+                    render_progress(completed, total_units, started_at, message.get("message") or "Compiler message", fresh_count)
                 continue
             if reason == "build-script-executed":
                 continue
             if reason == "build-finished":
                 success = bool(parsed.get("success"))
-                render_progress(total_units if success else completed, total_units, started_at, "构建完成", fresh_count, final=success)
+                render_progress(total_units if success else completed, total_units, started_at, "Build finished", fresh_count, final=success)
                 continue
 
         emit_text_line(line)
-        render_progress(completed, total_units, started_at, "处理中", fresh_count)
+        render_progress(completed, total_units, started_at, "Processing", fresh_count)
 
     exit_code = process.wait()
     if exit_code != 0:
@@ -5270,25 +5439,25 @@ build_source_binary() {
   local build_mode build_target source_binary
 
   IFS=$'\t' read -r build_mode build_target <<<"$(detect_source_build_strategy "$workspace_root")" \
-    || die "当前源码仓库未检测到可构建的 codex CLI 入口。"
+    || die "No buildable codex CLI entry found in the source repo."
 
-  log_step "编译源码版 Hodex"
+  log_step "Build Hodex from source"
   case "$build_mode" in
     package)
       run_with_retry "cargo-build" run_cargo_build_with_progress "$workspace_root" "$build_mode" "$build_target" \
-        || die "源码编译失败: $workspace_root"
+        || die "Source build failed: $workspace_root"
       ;;
     bin)
       run_with_retry "cargo-build" run_cargo_build_with_progress "$workspace_root" "$build_mode" "$build_target" \
-        || die "源码编译失败: $workspace_root"
+        || die "Source build failed: $workspace_root"
       ;;
     *)
-      die "未知的源码构建模式: $build_mode"
+      die "Unknown source build mode: $build_mode"
       ;;
   esac
 
   source_binary="$workspace_root/target/release/codex"
-  [[ -x "$source_binary" ]] || die "源码构建完成，但未找到预期产物: $source_binary"
+  [[ -x "$source_binary" ]] || die "Source build finished but expected artifact not found: $source_binary"
 
   ensure_dir_writable "$(dirname "$binary_output_path")"
   install -m 0755 "$source_binary" "$binary_output_path"
@@ -5306,13 +5475,13 @@ append_missing_tool() {
 array_length_safe() {
   local array_name="$1"
   local count
-  count="$(eval "set -- \${$array_name[@]-}; printf '%s' \$#")"
+  count="$(eval "set -- \${${array_name}[@]-}; printf '%s' \$#")"
   printf '%s\n' "$count"
 }
 
 array_items_safe() {
   local array_name="$1"
-  eval "printf '%s\n' \"\${$array_name[@]-}\""
+  eval "printf '%s\n' \"\${${array_name}[@]-}\""
 }
 
 detect_source_toolchain_report() {
@@ -5345,57 +5514,57 @@ detect_source_toolchain_report() {
 
 print_source_toolchain_report() {
   local item
-  printf '源码模式工具链检查:\n'
-  printf '  必需项:\n'
+  printf 'Source toolchain check:\n'
+  printf '  Required:\n'
   for item in git rustup cargo rustc; do
     if command_exists "$item"; then
-      printf '    - %s: 已安装\n' "$item"
+      printf '    - %s: installed\n' "$item"
     else
-      printf '    - %s: 缺失\n' "$item"
+      printf '    - %s: missing\n' "$item"
     fi
   done
 
   case "$OS_NAME" in
     darwin)
       if xcode-select -p >/dev/null 2>&1; then
-        printf '    - xcode-clt: 已安装\n'
+        printf '    - xcode-clt: installed\n'
       else
-        printf '    - xcode-clt: 缺失\n'
+        printf '    - xcode-clt: missing\n'
       fi
       if command_exists pkg-config; then
-        printf '    - pkg-config: 已安装\n'
+        printf '    - pkg-config: installed\n'
       else
-        printf '    - pkg-config: 缺失\n'
+        printf '    - pkg-config: missing\n'
       fi
       ;;
     linux)
       for item in cc c++ pkg-config; do
         if command_exists "$item"; then
-          printf '    - %s: 已安装\n' "$item"
+          printf '    - %s: installed\n' "$item"
         else
-          printf '    - %s: 缺失\n' "$item"
+          printf '    - %s: missing\n' "$item"
         fi
       done
       ;;
   esac
 
-  printf '  可选项:\n'
+  printf '  Optional:\n'
   for item in just node; do
     if command_exists "$item"; then
-      printf '    - %s: 已安装\n' "$item"
+      printf '    - %s: installed\n' "$item"
     else
-      printf '    - %s: 缺失\n' "$item"
+      printf '    - %s: missing\n' "$item"
     fi
   done
   if command_exists npm || command_exists pnpm; then
-    printf '    - npm/pnpm: 已安装\n'
+    printf '    - npm/pnpm: installed\n'
   else
-    printf '    - npm/pnpm: 缺失\n'
+    printf '    - npm/pnpm: missing\n'
   fi
 }
 
 install_rustup_via_script() {
-  log_step "安装 Rust 工具链（rustup）"
+  log_step "Install Rust toolchain (rustup)"
   run_with_retry "rustup-install" /bin/bash -lc "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
   export PATH="$HOME/.cargo/bin:$PATH"
 }
@@ -5416,8 +5585,8 @@ install_homebrew_if_needed() {
     return 0
   fi
 
-  prompt_yes_no "未检测到 Homebrew，是否先安装 Homebrew？[Y/n]: " "Y" || return 1
-  log_step "安装 Homebrew"
+  prompt_yes_no "Homebrew not detected. Install Homebrew first? [Y/n]: " "Y" || return 1
+  log_step "Install Homebrew"
   run_with_retry "brew-install" /bin/bash -lc 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
   if [[ -x /opt/homebrew/bin/brew ]]; then
@@ -5443,12 +5612,12 @@ auto_install_source_toolchain() {
         [[ -n "$item" ]] || continue
         case "$item" in
           git | pkg-config | node)
-            install_homebrew_if_needed || die "缺少 Homebrew，无法自动安装 $item。"
+            install_homebrew_if_needed || die "Homebrew is missing; cannot auto-install $item."
             brew install "$item"
             ;;
           just)
             command_exists cargo || install_rustup_via_script
-            log_step "安装 just"
+            log_step "Install just"
             run_with_retry "cargo-install" cargo install just
             export PATH="$HOME/.cargo/bin:$PATH"
             ;;
@@ -5457,7 +5626,7 @@ auto_install_source_toolchain() {
             ;;
           xcode-clt)
             xcode-select --install || true
-            die "已触发 Xcode Command Line Tools 安装，请安装完成后重新执行。"
+            die "Triggered Xcode Command Line Tools installer. Finish installation and rerun."
             ;;
         esac
       done < <(
@@ -5466,7 +5635,7 @@ auto_install_source_toolchain() {
       )
       ;;
     linux)
-      package_manager="$(detect_linux_package_manager)" || die "未识别到可自动安装依赖的 Linux 包管理器。"
+      package_manager="$(detect_linux_package_manager)" || die "No supported Linux package manager detected for auto-install."
       while IFS= read -r item; do
         [[ -n "$item" ]] || continue
         case "$item" in
@@ -5489,7 +5658,7 @@ auto_install_source_toolchain() {
             ;;
           just)
             command_exists cargo || install_rustup_via_script
-            log_step "安装 just"
+            log_step "Install just"
             run_with_retry "cargo-install" cargo install just
             export PATH="$HOME/.cargo/bin:$PATH"
             ;;
@@ -5527,7 +5696,7 @@ auto_install_source_toolchain() {
 
 source_toolchain_snapshot_json() {
   if [[ "$JSON_BACKEND" == "python3" ]]; then
-    python3 - "$OS_NAME" "$ARCH_NAME" "$(printf '%s\n' ${SOURCE_REQUIRED_MISSING[@]-})" "$(printf '%s\n' ${SOURCE_OPTIONAL_MISSING[@]-})" <<'PY'
+    python3 - "$OS_NAME" "$ARCH_NAME" "$(printf '%s\n' "${SOURCE_REQUIRED_MISSING[@]-}")" "$(printf '%s\n' "${SOURCE_OPTIONAL_MISSING[@]-}")" <<'PY'
 import json
 import sys
 
@@ -5545,8 +5714,8 @@ PY
   fi
 
   local required optional
-  required="$(printf '%s\n' ${SOURCE_REQUIRED_MISSING[@]-} | awk 'NF' | jq -R . | jq -s .)"
-  optional="$(printf '%s\n' ${SOURCE_OPTIONAL_MISSING[@]-} | awk 'NF' | jq -R . | jq -s .)"
+  required="$(printf '%s\n' "${SOURCE_REQUIRED_MISSING[@]-}" | awk 'NF' | jq -R . | jq -s .)"
+  optional="$(printf '%s\n' "${SOURCE_OPTIONAL_MISSING[@]-}" | awk 'NF' | jq -R . | jq -s .)"
   jq -n \
     --arg os "$OS_NAME" \
     --arg arch "$ARCH_NAME" \
@@ -5571,14 +5740,14 @@ ensure_source_toolchain_ready() {
     return 0
   fi
 
-  if prompt_yes_no "是否自动安装上述缺失工具？[Y/n]: " "Y"; then
+  if prompt_yes_no "Auto-install missing tools above? [Y/n]: " "Y"; then
     auto_install_source_toolchain
     detect_source_toolchain_report
     print_source_toolchain_report
   fi
 
   required_count="$(array_length_safe SOURCE_REQUIRED_MISSING)"
-  ((required_count == 0)) || die "源码构建所需工具链仍不完整，请先补齐缺失项后重试。"
+  ((required_count == 0)) || die "Source build toolchain is still incomplete. Install missing items and retry."
 }
 
 prepare_source_checkout() {
@@ -5587,33 +5756,34 @@ prepare_source_checkout() {
 
   if [[ ! -e "$checkout_dir" ]]; then
     ensure_dir_writable "$(dirname "$checkout_dir")"
-    log_step "克隆源码仓库"
+    log_step "Clone source repo"
     run_with_retry "git-clone" git clone "$remote_url" "$checkout_dir" \
-      || die "克隆源码仓库失败: $remote_url"
+      || die "Failed to clone source repo: $remote_url"
     return
   fi
 
   if [[ -d "$checkout_dir/.git" ]]; then
-    log_step "复用现有源码 checkout"
+    log_step "Reuse existing source checkout"
     local current_remote
     current_remote="$(git -C "$checkout_dir" remote get-url origin 2>/dev/null || true)"
     if [[ -n "$current_remote" && "$current_remote" != "$remote_url" ]]; then
-      if prompt_yes_no "源码目录已存在且远端不同，是否将 origin 改为 $remote_url ？[y/N]: " "N"; then
+      if prompt_yes_no "Source checkout exists with a different remote. Update origin to $remote_url ? [y/N]: " "N"; then
         git -C "$checkout_dir" remote set-url origin "$remote_url"
       else
-        die "源码目录远端与当前请求不一致: $checkout_dir"
+        die "Source checkout remote does not match requested: $checkout_dir"
       fi
     fi
     return
   fi
 
-  die "源码 checkout 目录已存在且不是 Git 仓库: $checkout_dir"
+  die "Source checkout path exists but is not a Git repo: $checkout_dir"
 }
 
 apply_source_profile_runtime_choice() {
   local state_file="$1"
   local profile_name="$2"
   local current_mode="$3"
+  : "$current_mode"
 
   printf 'no\n'
 }
@@ -5622,7 +5792,7 @@ perform_source_build() {
   local state_file="$1"
   local profile_name="$2"
   local activation_mode="${3:-preserve}"
-  local action_label="${4:-同步源码条目}"
+  local action_label="${4:-Sync source profile}"
   local skip_plan_confirm="${5:-0}"
   local repo_input remote_url checkout_dir default_checkout_dir ref_name ref_kind workspace_mode workspace_root existing_checkout_dir
   local installed_at last_synced_at toolchain_snapshot checkout_mode_preview
@@ -5632,17 +5802,17 @@ perform_source_build() {
     load_state_env "$state_file"
   fi
   IFS=$'\t' read -r repo_input remote_url <<<"$(resolve_source_repo_input "$state_file" "$profile_name")"
-  [[ -n "$remote_url" ]] || die "未提供可用的源码仓库地址。"
+  [[ -n "$remote_url" ]] || die "No valid source repo provided."
 
   default_checkout_dir="$(default_source_checkout_dir "$remote_url")"
   existing_checkout_dir="$(state_get_source_profile_field "$state_file" "$profile_name" "checkout_dir")"
   checkout_dir="$(resolve_source_checkout_dir "$default_checkout_dir" "$profile_name" "$state_file")"
   ref_name="$SOURCE_REF"
-  checkout_mode_preview="复用现有 checkout"
+  checkout_mode_preview="Reuse existing checkout"
   if [[ ! -e "$checkout_dir" ]]; then
-    checkout_mode_preview="首次 clone 到新目录"
+    checkout_mode_preview="Clone into new directory"
   elif [[ -n "$SOURCE_CHECKOUT_DIR" && "$checkout_dir" != "$default_checkout_dir" ]]; then
-    checkout_mode_preview="使用显式指定的独立 checkout"
+    checkout_mode_preview="Use explicitly specified checkout"
   fi
 
   if ((skip_plan_confirm == 0)); then
@@ -5696,9 +5866,9 @@ perform_source_build() {
 
   sync_runtime_wrappers_from_state "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh"
   update_path_if_needed
-  state_update_runtime_metadata "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh" "$PATH_UPDATE_MODE" "$PATH_PROFILE"
+  state_update_runtime_metadata "$state_file" "$COMMAND_DIR" "$STATE_DIR/libexec/hodexctl.sh" "$PATH_UPDATE_MODE" "$PATH_PROFILE" "$PATH_MANAGED_BY_HODEXCTL" "$PATH_DETECTED_SOURCE"
 
-  log_step "源码同步完成: $checkout_dir"
+  log_step "Source sync completed: $checkout_dir"
   print_source_result_summary "$action_label" "$profile_name" "$ref_name" "$checkout_dir" "" ""
 }
 
@@ -5709,29 +5879,29 @@ perform_source_install() {
   run_source_install_wizard || return 0
   profile_name="$(resolve_source_profile_name "$state_file" 0)"
   activation_mode="no"
-  perform_source_build "$state_file" "$profile_name" "$activation_mode" "下载源码并准备工具链" 1
+  perform_source_build "$state_file" "$profile_name" "$activation_mode" "Download source and prepare toolchain" 1
 }
 
 perform_source_update() {
   local state_file="$STATE_DIR/state.json"
   local profile_name current_ref
 
-  [[ -f "$state_file" ]] || die "未检测到源码记录，请先执行 hodexctl source install。"
+  [[ -f "$state_file" ]] || die "No source profiles found. Run 'hodexctl source install' first."
   profile_name="$(resolve_source_profile_name "$state_file" 1)"
   current_ref="$(state_get_source_profile_field "$state_file" "$profile_name" "current_ref")"
   [[ -n "$SOURCE_REF" && "$SOURCE_REF" != "$DEFAULT_SOURCE_REF" ]] || SOURCE_REF="${current_ref:-$DEFAULT_SOURCE_REF}"
-  perform_source_build "$state_file" "$profile_name" "no" "更新源码"
+  perform_source_build "$state_file" "$profile_name" "no" "Update source"
 }
 
 perform_source_rebuild() {
-  die "source rebuild 已移除；源码模式现在只保留源码下载/同步和开发工具链准备功能。"
+  die "source rebuild has been removed; source mode now only keeps download/sync and toolchain prep."
 }
 
 perform_source_switch() {
   local state_file="$STATE_DIR/state.json"
   local profile_name
 
-  [[ -f "$state_file" ]] || die "未检测到源码记录，请先执行 hodexctl source install。"
+  [[ -f "$state_file" ]] || die "No source profiles found. Run 'hodexctl source install' first."
   profile_name="$(resolve_source_profile_name "$state_file" 1)"
   if ! ((EXPLICIT_SOURCE_REF)); then
     if [[ -t 0 && -t 1 ]] && ! ((AUTO_YES)); then
@@ -5745,20 +5915,20 @@ perform_source_switch() {
       )"
       EXPLICIT_SOURCE_REF=1
     else
-      die "source switch 需要通过 --ref 指定目标分支、标签或提交。"
+      die "source switch requires --ref to specify branch/tag/commit."
     fi
   fi
-  perform_source_build "$state_file" "$profile_name" "no" "切换 ref 并同步源码"
+  perform_source_build "$state_file" "$profile_name" "no" "Switch ref and sync source"
 }
 
 perform_source_status() {
   local state_file="$STATE_DIR/state.json"
   local profile_name source_count
 
-  printf '源码模式状态:\n'
+  printf 'Source mode status:\n'
   source_count="$(state_count_source_profiles "$state_file")"
   if [[ ! -f "$state_file" ]] || [[ "$source_count" == "0" ]]; then
-    printf '  未安装任何源码条目\n'
+    printf '  No source profiles installed\n'
     return 0
   fi
 
@@ -5769,38 +5939,38 @@ perform_source_status() {
   fi
 
   if [[ -n "$profile_name" ]]; then
-    [[ -n "$(state_get_source_profile_field "$state_file" "$profile_name" "name")" ]] || die "未找到源码条目: $profile_name"
-    printf '  名称: %s\n' "$profile_name"
-    printf '  仓库: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "repo_input")"
-    printf '  远端: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "remote_url")"
-    printf '  目录: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "checkout_dir")"
+    [[ -n "$(state_get_source_profile_field "$state_file" "$profile_name" "name")" ]] || die "Source profile not found: $profile_name"
+    printf '  Name: %s\n' "$profile_name"
+    printf '  Repo: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "repo_input")"
+    printf '  Remote: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "remote_url")"
+    printf '  Checkout: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "checkout_dir")"
     printf '  Ref: %s (%s)\n' \
       "$(state_get_source_profile_field "$state_file" "$profile_name" "current_ref")" \
       "$(state_get_source_profile_field "$state_file" "$profile_name" "ref_kind")"
-    printf '  工作区: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "build_workspace_root")"
-    printf '  安装时间: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "installed_at")"
-    printf '  最近同步: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "last_synced_at")"
-    printf '  模式: 仅管理源码 checkout 与工具链，不生成源码命令入口\n'
+    printf '  Workspace: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "build_workspace_root")"
+    printf '  Installed at: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "installed_at")"
+    printf '  Last synced: %s\n' "$(state_get_source_profile_field "$state_file" "$profile_name" "last_synced_at")"
+    printf '  Mode: manage checkout and toolchain only; no source command wrappers generated\n'
     return 0
   fi
 
-  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$profile_name" ]] || continue
-    printf '  - %s | %s | %s | %s | 仅源码管理\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
+    printf '  - %s | %s | %s | %s | source-only management\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
   done < <(state_emit_source_profiles "$state_file")
 }
 
 perform_source_list() {
   local state_file="$STATE_DIR/state.json"
-  local profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
-  printf '源码条目列表:\n'
+  local profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
+  printf 'Source profiles:\n'
   if [[ ! -f "$state_file" ]] || [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
-    printf '  当前没有已记录的源码条目\n'
+    printf '  No source profiles recorded\n'
     return 0
   fi
-  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$profile_name" ]] || continue
-    printf '  - %s | %s | %s | %s | 仅源码管理\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
+    printf '  - %s | %s | %s | %s | source-only management\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}" "${checkout_dir:-<unknown>}"
   done < <(state_emit_source_profiles "$state_file")
 }
 
@@ -5808,13 +5978,13 @@ perform_source_uninstall() {
   local state_file="$STATE_DIR/state.json"
   local profile_name binary_path checkout_dir current_ref remove_checkout answer final_source_count final_has_release
 
-  [[ -f "$state_file" ]] || die "未检测到源码条目。"
+  [[ -f "$state_file" ]] || die "No source profiles found."
   load_state_env "$state_file"
   profile_name="$(resolve_source_profile_name "$state_file" 1)"
   binary_path="$(state_get_source_profile_field "$state_file" "$profile_name" "binary_path")"
   checkout_dir="$(state_get_source_profile_field "$state_file" "$profile_name" "checkout_dir")"
   current_ref="$(state_get_source_profile_field "$state_file" "$profile_name" "current_ref")"
-  confirm_source_action_plan "卸载源码条目" "$profile_name" "$(state_get_source_profile_field "$state_file" "$profile_name" "repo_input")" "$checkout_dir" "$current_ref" "将删除源码条目记录；可选删除 checkout。" "删除现有条目资源" "$current_ref" "$checkout_dir" || return 0
+  confirm_source_action_plan "Uninstall source profile" "$profile_name" "$(state_get_source_profile_field "$state_file" "$profile_name" "repo_input")" "$checkout_dir" "$current_ref" "This will remove the source profile record; optionally delete the checkout." "Remove existing profile assets" "$current_ref" "$checkout_dir" || return 0
 
   rm -f "$COMMAND_DIR/$profile_name" "$STATE_COMMAND_DIR/$profile_name" 2>/dev/null || true
   [[ -n "$binary_path" ]] && rm -f "$binary_path"
@@ -5830,7 +6000,7 @@ perform_source_uninstall() {
       if ((AUTO_YES)); then
         remove_checkout=0
       else
-        if prompt_yes_no "是否同时删除源码目录 ${checkout_dir} ？[y/N]: " "N"; then
+        if prompt_yes_no "Also delete checkout directory ${checkout_dir} ? [y/N]: " "N"; then
           remove_checkout=1
         else
           remove_checkout=0
@@ -5863,9 +6033,7 @@ perform_source_uninstall() {
   fi
 
   if [[ -f "$state_file" ]] && [[ "$final_source_count" == "0" ]] && ((final_has_release == 0)); then
-    if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
-      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
-    fi
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
     rm -f "${STATE_COMMAND_DIR:-$COMMAND_DIR}/hodexctl" 2>/dev/null || true
     rm -f "$state_file"
     rm -f "$STATE_DIR/list-ui-state.json"
@@ -5879,8 +6047,8 @@ perform_source_uninstall() {
     rmdir "$STATE_DIR" 2>/dev/null || true
   fi
 
-  printf '已卸载源码条目: %s\n' "$profile_name"
-  print_source_result_summary "卸载源码条目" "$profile_name" "$current_ref" "$checkout_dir" "" ""
+  printf 'Source profile uninstalled: %s\n' "$profile_name"
+  print_source_result_summary "Uninstall source profile" "$profile_name" "$current_ref" "$checkout_dir" "" ""
 }
 
 show_source_management_menu() {
@@ -5898,40 +6066,40 @@ show_source_management_menu() {
 
     printf '\033[H\033[2J'
     if ((COLOR_ENABLED)); then
-      printf '%s%s源码下载 / 管理%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
-      printf '%s规则%s: `hodex` 固定指向 release；源码模式只管理 checkout 和工具链。\n' "$COLOR_HINT" "$COLOR_RESET"
-      printf '%s当前状态%s: 已记录源码条目 %s 个\n\n' "$COLOR_HINT" "$COLOR_RESET" "$source_count"
+      printf '%s%sSource download / management%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+      printf '%sRule%s: `hodex` always points to release; source mode only manages checkout and toolchain.\n' "$COLOR_HINT" "$COLOR_RESET"
+      printf '%sCurrent%s: %s source profiles recorded\n\n' "$COLOR_HINT" "$COLOR_RESET" "$source_count"
     else
-      printf '源码下载 / 管理\n\n'
-      printf '规则: `hodex` 固定指向 release；源码模式只管理 checkout 和工具链。\n'
-      printf '当前状态: 已记录源码条目 %s 个\n\n' "$source_count"
+      printf 'Source download / management\n\n'
+      printf 'Rule: `hodex` always points to release; source mode only manages checkout and toolchain.\n'
+      printf 'Current: %s source profiles recorded\n\n' "$source_count"
     fi
-    printf '  [源码同步]\n'
-    printf '  1. 下载源码并准备工具链             下载或复用 checkout，并检查开发工具链\n'
-    printf '  2. 更新源码                         拉取当前源码条目对应 ref 的最新代码\n'
-    printf '  3. 切换分支 / 标签 / 提交并同步      切到新的 ref 后同步源码\n'
+    printf '  [Sync]\n'
+    printf '  1. Download source and prepare toolchain         Download or reuse checkout and check dev toolchain\n'
+    printf '  2. Update source                                 Fetch latest code for current profile ref\n'
+    printf '  3. Switch branch / tag / commit and sync         Switch to new ref then sync source\n'
     printf '\n'
-    printf '  [查看与清理]\n'
-    printf '  5. 查看源码状态                     查看单个或全部源码条目\n'
-    printf '  6. 卸载源码条目                     删除条目记录，可选删 checkout\n'
-    printf '  7. 列出源码条目                     快速查看所有源码条目摘要\n'
-    printf '  q. 返回版本列表\n\n'
-    printf '请选择操作（输入编号后回车）: '
+    printf '  [View / Clean up]\n'
+    printf '  5. View source status                     Show one or all source profiles\n'
+    printf '  6. Uninstall source profile               Remove profile record; optionally delete checkout\n'
+    printf '  7. List source profiles                   Quick summary of all source profiles\n'
+    printf '  q. Back to version list\n\n'
+    printf 'Choose an action (enter number): '
 
     local choice
     read -r choice
     case "$choice" in
       1)
-        action_label="下载源码并准备工具链"
-        action_hint="接下来会确认仓库、checkout 目录、工具链和源码记录名。"
+        action_label="Download source and prepare toolchain"
+        action_hint="Next: confirm repo, checkout dir, toolchain, and source profile name."
         ;;
       2)
-        action_label="更新源码"
-        action_hint="将拉取当前源码条目的最新代码并同步 checkout。"
+        action_label="Update source"
+        action_hint="Will fetch latest code for the current profile and sync checkout."
         ;;
       3)
-        action_label="切换 ref 并同步源码"
-        action_hint="接下来需要指定新的 branch / tag / commit。"
+        action_label="Switch ref and sync source"
+        action_hint="Next: specify a new branch / tag / commit."
         if ((AUTO_YES)); then
           if [[ -z "$SOURCE_REF" ]]; then
             SOURCE_REF="$DEFAULT_SOURCE_REF"
@@ -5940,21 +6108,21 @@ show_source_management_menu() {
         fi
         ;;
       5)
-        action_label="查看源码状态"
-        action_hint="将展示源码条目的详细状态信息。"
+        action_label="View source status"
+        action_hint="Will show detailed status for source profiles."
         ;;
       6)
-        action_label="卸载源码条目"
-        action_hint="将删除选中条目的记录；可选删除源码目录。"
+        action_label="Uninstall source profile"
+        action_hint="Will remove the selected profile record; optionally delete the checkout."
         ;;
       7)
-        action_label="列出源码条目"
-        action_hint="将展示当前所有源码条目摘要。"
+        action_label="List source profiles"
+        action_hint="Will show a summary for all source profiles."
         ;;
       q | Q) return 0 ;;
       *)
-        log_warn "请输入 1、2、3、5、6、7 或 q。"
-        printf '\n按回车继续...'
+        log_warn "Please enter 1, 2, 3, 5, 6, 7, or q."
+        printf '\nPress Enter to continue...'
         read -r _
         continue
         ;;
@@ -5962,13 +6130,13 @@ show_source_management_menu() {
 
     printf '\033[H\033[2J'
     if ((COLOR_ENABLED)); then
-      printf '%s%s源码下载 / 管理%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
-      printf '%s正在进入%s: %s\n' "$COLOR_STATUS" "$COLOR_RESET" "$action_label"
-      printf '%s提示%s: %s\n\n' "$COLOR_HINT" "$COLOR_RESET" "$action_hint"
+      printf '%s%sSource download / management%s\n\n' "$COLOR_HEADER" "$COLOR_BOLD" "$COLOR_RESET"
+      printf '%sEntering%s: %s\n' "$COLOR_STATUS" "$COLOR_RESET" "$action_label"
+      printf '%sHint%s: %s\n\n' "$COLOR_HINT" "$COLOR_RESET" "$action_hint"
     else
-      printf '源码下载 / 管理\n\n'
-      printf '正在进入: %s\n' "$action_label"
-      printf '提示: %s\n\n' "$action_hint"
+      printf 'Source download / management\n\n'
+      printf 'Entering: %s\n' "$action_label"
+      printf 'Hint: %s\n\n' "$action_hint"
     fi
     print_source_menu_action_preview "$choice"
     printf '\n'
@@ -5976,7 +6144,7 @@ show_source_management_menu() {
     saved_source_ref="$SOURCE_REF"
     saved_explicit_source_ref="$EXPLICIT_SOURCE_REF"
     local action_rc
-    printf '下面将直接显示实时日志和输入提示。\n\n'
+    printf 'Real-time logs and prompts will follow.\n\n'
     set +e
     case "$choice" in
       1) run_source_menu_action install ;;
@@ -5993,12 +6161,12 @@ show_source_management_menu() {
 
     printf '\n'
     if ((action_rc == 0)); then
-      log_info "操作完成: $action_label"
+      log_info "Completed: $action_label"
     else
-      log_warn "操作失败: $action_label"
-      log_warn "请直接查看上方实时日志定位原因。"
+      log_warn "Failed: $action_label"
+      log_warn "Check the log above to diagnose the issue."
     fi
-    printf '\n按回车继续...'
+    printf '\nPress Enter to continue...'
     read -r _
   done
 }
@@ -6014,65 +6182,65 @@ run_with_optional_sudo() {
     return
   fi
 
-  die "需要更高权限执行命令，但系统没有 sudo：$*"
+  die "Elevated privileges required but sudo is not available: $*"
 }
 
 install_node_native() {
   if [[ "$OS_NAME" == "darwin" ]]; then
     if ! command_exists brew; then
-      log_warn "未检测到 Homebrew，无法自动使用系统方式安装。请改用手动安装：$NODE_DOWNLOAD_URL"
+      log_warn "Homebrew not detected. Cannot install via system package manager. Use manual install: $NODE_DOWNLOAD_URL"
       return
     fi
-    log_step "使用 Homebrew 安装 Node.js"
-    brew install node || log_warn "Homebrew 安装 Node.js 失败，请稍后手动处理。"
+    log_step "Install Node.js with Homebrew"
+    brew install node || log_warn "Homebrew failed to install Node.js; please install manually later."
     return
   fi
 
   if command_exists apt; then
-    log_step "使用 apt 安装 Node.js"
+    log_step "Install Node.js with apt"
     run_with_optional_sudo apt update
     run_with_optional_sudo apt install -y nodejs npm
     return
   fi
   if command_exists dnf; then
-    log_step "使用 dnf 安装 Node.js"
+    log_step "Install Node.js with dnf"
     run_with_optional_sudo dnf install -y nodejs npm
     return
   fi
   if command_exists yum; then
-    log_step "使用 yum 安装 Node.js"
+    log_step "Install Node.js with yum"
     run_with_optional_sudo yum install -y nodejs npm
     return
   fi
   if command_exists pacman; then
-    log_step "使用 pacman 安装 Node.js"
+    log_step "Install Node.js with pacman"
     run_with_optional_sudo pacman -Sy --noconfirm nodejs npm
     return
   fi
   if command_exists zypper; then
-    log_step "使用 zypper 安装 Node.js"
+    log_step "Install Node.js with zypper"
     run_with_optional_sudo zypper install -y nodejs npm
     return
   fi
 
-  log_warn "未检测到支持的原生包管理器，请改用 nvm 或手动安装：$NODE_DOWNLOAD_URL"
+  log_warn "No supported native package manager detected. Use nvm or manual install: $NODE_DOWNLOAD_URL"
 }
 
 install_node_with_nvm() {
   if [[ "$OS_NAME" != "darwin" && "$OS_NAME" != "linux" ]]; then
-    log_warn "当前平台不支持自动使用 nvm。"
+    log_warn "Auto nvm install is not supported on this platform."
     return
   fi
 
   local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
   if [[ ! -s "$nvm_dir/nvm.sh" ]]; then
-    log_step "安装 nvm"
+    log_step "Install nvm"
     run_with_retry "nvm-install" /bin/bash -lc "curl -fsSL '$NVM_INSTALL_URL' | bash"
   fi
 
   # shellcheck disable=SC1090
   source "$nvm_dir/nvm.sh"
-  log_step "使用 nvm 安装 Node.js LTS"
+  log_step "Install Node.js LTS with nvm"
   nvm install --lts
   nvm alias default 'lts/*' >/dev/null 2>&1 || true
 }
@@ -6108,7 +6276,7 @@ sync_runtime_wrappers_from_state() {
   local state_file="$1"
   local command_dir="$2"
   local controller_path="$3"
-  local line profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex
+  local line profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at
   local release_binary_path release_installed=0 source_count=0 keep_controller_wrapper=0
 
   ensure_dir_writable "$command_dir"
@@ -6123,14 +6291,14 @@ sync_runtime_wrappers_from_state() {
     fi
   fi
 
-  if { ((release_installed)) || [[ "$source_count" != "0" ]]; } && [[ -n "$controller_path" ]]; then
+  if [[ -f "$state_file" && -n "$controller_path" ]]; then
     keep_controller_wrapper=1
   fi
   if ((keep_controller_wrapper)); then
-    generate_hodexctl_wrapper "$command_dir/hodexctl" "$controller_path"
+    generate_hodexctl_wrapper "$command_dir/hodexctl" "$controller_path" "$STATE_DIR"
   fi
 
-  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+  while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
     [[ -n "$profile_name" ]] || continue
     if [[ -n "$binary_path" && -f "$binary_path" ]]; then
       generate_runtime_wrapper "$command_dir/$profile_name" "$binary_path" "$profile_name"
@@ -6176,13 +6344,13 @@ perform_install_like() {
     asset_candidates+=("$candidate")
   done < <(get_asset_candidates)
   asset_line="$(json_find_asset_info "$release_file" "${asset_candidates[@]}")" \
-    || die "release 未找到匹配当前平台的资产：${asset_candidates[*]}"
+    || die "Release has no matching asset for this platform: ${asset_candidates[*]}"
   IFS=$'\t' read -r asset_name asset_url asset_digest <<<"$asset_line"
 
   log_step "$action_label Hodex"
-  log_step "检测到平台: $PLATFORM_LABEL"
-  log_step "命中 release: ${release_name:-<unknown>} (${release_tag:-<unknown>})"
-  log_step "下载资产: $asset_name"
+  log_step "Detected platform: $PLATFORM_LABEL"
+  log_step "Selected release: ${release_name:-<unknown>} (${release_tag:-<unknown>})"
+  log_step "Download asset: $asset_name"
 
   select_command_dir
   binary_dir="$STATE_DIR/bin"
@@ -6193,11 +6361,11 @@ perform_install_like() {
 
   tmp_dir="$(mktemp -d)"
   download_path="$tmp_dir/$asset_name"
-  log_step "临时下载路径: $download_path"
-  log_step "安装目标二进制: $binary_path"
-  log_step "命令目录: $COMMAND_DIR"
+  log_step "Temp download path: $download_path"
+  log_step "Install target binary: $binary_path"
+  log_step "Command dir: $COMMAND_DIR"
 
-  download_binary "$asset_url" "$download_path" "下载 $asset_name"
+  download_binary "$asset_url" "$download_path" "Downloading $asset_name"
   chmod 0755 "$download_path"
   verify_digest_if_present "$download_path" "$asset_digest"
 
@@ -6233,6 +6401,8 @@ perform_install_like() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$NODE_SETUP_CHOICE" \
     "$install_time"
 
@@ -6251,50 +6421,158 @@ perform_install_like() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$NODE_SETUP_CHOICE" \
     "$install_time"
 
-  log_step "安装完成: $binary_path"
+  log_step "Install complete: $binary_path"
   "$binary_path" --version
 
   case "$PATH_UPDATE_MODE" in
     added)
-      log_info "已写入 PATH: $PATH_PROFILE"
+      log_info "PATH updated (written): $PATH_PROFILE"
       ;;
     configured)
-      log_info "已刷新 PATH 配置: $PATH_PROFILE"
+      log_info "PATH refreshed: $PATH_PROFILE"
       ;;
     user-skipped | disabled)
-      log_warn "命令目录未自动写入 PATH，请手动加入: $COMMAND_DIR"
+      log_warn "Command dir not added to PATH; add manually: $COMMAND_DIR"
       ;;
     already)
-      log_info "命令目录已在 PATH 中: $COMMAND_DIR"
+      log_info "Command dir already in PATH: $COMMAND_DIR"
       ;;
   esac
 
-  log_info "下一步: 运行 'hodex --version' 验证安装"
-  log_info "管理命令: 'hodexctl status' / 'hodexctl list'"
+  log_info "Next: run 'hodex --version' to verify the install"
+  log_info "Management: 'hodexctl status' / 'hodexctl list'"
 
   rm -rf "$tmp_dir"
 }
 
+perform_manager_install() {
+  local state_file="$STATE_DIR/state.json"
+  local had_existing_state=0
+  local install_time
+  local controller_path
+
+  if [[ -f "$state_file" ]]; then
+    load_state_env "$state_file"
+    had_existing_state=1
+  fi
+
+  log_step "Install hodexctl manager"
+  select_command_dir
+
+  controller_path="$STATE_DIR/libexec/hodexctl.sh"
+  ensure_dir_writable "$(dirname "$controller_path")"
+  sync_controller_copy "$controller_path"
+
+  if ((had_existing_state)); then
+    remove_old_wrappers_if_needed "$COMMAND_DIR"
+  fi
+
+  install_time="${STATE_INSTALLED_AT:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+  write_state_file \
+    "$state_file" \
+    "$STATE_INSTALLED_VERSION" \
+    "$STATE_RELEASE_TAG" \
+    "$STATE_RELEASE_NAME" \
+    "$STATE_ASSET_NAME" \
+    "$STATE_BINARY_PATH" \
+    "$controller_path" \
+    "$COMMAND_DIR" \
+    "$COMMAND_DIR/hodex" \
+    "$COMMAND_DIR/hodexctl" \
+    "$PATH_UPDATE_MODE" \
+    "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
+    "$STATE_NODE_SETUP_CHOICE" \
+    "$install_time"
+
+  sync_runtime_wrappers_from_state "$state_file" "$COMMAND_DIR" "$controller_path"
+  update_path_if_needed
+  write_state_file \
+    "$state_file" \
+    "$STATE_INSTALLED_VERSION" \
+    "$STATE_RELEASE_TAG" \
+    "$STATE_RELEASE_NAME" \
+    "$STATE_ASSET_NAME" \
+    "$STATE_BINARY_PATH" \
+    "$controller_path" \
+    "$COMMAND_DIR" \
+    "$COMMAND_DIR/hodex" \
+    "$COMMAND_DIR/hodexctl" \
+    "$PATH_UPDATE_MODE" \
+    "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
+    "$STATE_NODE_SETUP_CHOICE" \
+    "$install_time"
+
+  log_step "hodexctl installed: $COMMAND_DIR/hodexctl"
+  log_info "State dir: $STATE_DIR"
+  log_info "Command dir: $COMMAND_DIR"
+  log_info "Only the manager is installed; run: hodexctl install"
+
+  case "$PATH_UPDATE_MODE" in
+    added)
+      log_info "PATH updated (written): $PATH_PROFILE"
+      ;;
+    configured)
+      log_info "PATH refreshed: $PATH_PROFILE"
+      ;;
+    already)
+      log_info "Command dir already in PATH: $COMMAND_DIR"
+      ;;
+    disabled | user-skipped)
+      log_warn "Command dir not added to PATH; add manually: $COMMAND_DIR"
+      ;;
+  esac
+
+  if [[ "$PATH_UPDATE_MODE" == "added" || "$PATH_UPDATE_MODE" == "configured" ]]; then
+    log_info "If the current shell still does not see hodexctl, reopen it or run: source \"$PATH_PROFILE\""
+  fi
+  log_info "Next: run 'hodexctl' for help"
+  log_info "Install release: 'hodexctl install'"
+  log_info "List versions: 'hodexctl list'"
+  log_info "Download source and prepare toolchain: 'hodexctl source install --repo stellarlinkco/codex --ref main'"
+}
+
 perform_uninstall() {
   local state_file="$STATE_DIR/state.json"
-  [[ -f "$state_file" ]] || die "未检测到 hodex 安装状态，无需卸载。"
-  [[ -n "$(json_get_field "$state_file" "binary_path")" ]] || die "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+  [[ -f "$state_file" ]] || die "No hodex installation detected; nothing to uninstall."
+
+  if [[ -z "$(json_get_field "$state_file" "binary_path")" ]]; then
+    if [[ "$(state_count_source_profiles "$state_file")" != "0" ]]; then
+      die "No release install found; to remove source profiles use: hodexctl source uninstall."
+    fi
+
+    load_state_env "$state_file"
+    log_step "Uninstall hodexctl manager"
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
+    rm -f "$STATE_COMMAND_DIR/hodexctl" 2>/dev/null || true
+    rm -f "$STATE_CONTROLLER_PATH" 2>/dev/null || true
+    rm -f "$state_file" 2>/dev/null || true
+    rm -f "$STATE_DIR/list-ui-state.json" 2>/dev/null || true
+    rmdir "$STATE_COMMAND_DIR" 2>/dev/null || true
+    rmdir "$STATE_DIR/libexec" 2>/dev/null || true
+    rmdir "$STATE_DIR" 2>/dev/null || true
+    log_info "hodexctl manager uninstalled."
+    return
+  fi
 
   load_state_env "$state_file"
 
-  log_step "卸载正式版 Hodex"
+  log_step "Uninstall Hodex release"
   rm -f "$STATE_BINARY_PATH"
   remove_managed_runtime_wrappers_from_dir "$STATE_COMMAND_DIR" "$state_file"
   clear_release_state_file "$state_file"
   sync_runtime_wrappers_from_state "$state_file" "$STATE_COMMAND_DIR" "$STATE_CONTROLLER_PATH"
 
-  if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
-    if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
-      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
-    fi
+  if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
+    cleanup_path_blocks_for_uninstall "$(select_profile_file)"
   fi
 
   if [[ "$(state_count_source_profiles "$state_file")" == "0" ]]; then
@@ -6306,83 +6584,118 @@ perform_uninstall() {
     rmdir "$STATE_DIR/libexec" 2>/dev/null || true
     rmdir "$STATE_DIR/bin" 2>/dev/null || true
     rmdir "$STATE_DIR" 2>/dev/null || true
-    log_info "已删除正式版二进制、包装器和安装状态。"
+    log_info "Removed release binary, wrappers, and install state."
   else
-    log_info "已删除正式版二进制；源码条目与管理脚本已保留。"
+    log_info "Removed release binary; source profiles and manager script kept."
   fi
 }
 
 perform_status() {
   local state_file="$STATE_DIR/state.json"
+  local repair_needed=0
 
-  printf '平台: %s\n' "$PLATFORM_LABEL"
-  printf '状态目录: %s\n' "$STATE_DIR"
+  printf 'Platform: %s\n' "$PLATFORM_LABEL"
+  printf 'State dir: %s\n' "$STATE_DIR"
   if ((IS_WSL)); then
-    printf 'WSL: 是\n'
+    printf 'WSL: yes\n'
   else
-    printf 'WSL: 否\n'
+    printf 'WSL: no\n'
   fi
 
   if [[ -f "$state_file" ]]; then
     load_state_env "$state_file"
     if [[ -n "$STATE_BINARY_PATH" ]]; then
-      printf '正式版安装状态: 已安装\n'
-      printf '版本: %s\n' "$STATE_INSTALLED_VERSION"
+      printf 'Release install status: installed\n'
+      printf 'Version: %s\n' "$STATE_INSTALLED_VERSION"
       printf 'Release: %s (%s)\n' "$STATE_RELEASE_NAME" "$STATE_RELEASE_TAG"
-      printf '资产: %s\n' "$STATE_ASSET_NAME"
-      printf '二进制: %s\n' "$STATE_BINARY_PATH"
+      printf 'Asset: %s\n' "$STATE_ASSET_NAME"
+      printf 'Binary: %s\n' "$STATE_BINARY_PATH"
     else
-      printf '正式版安装状态: 未安装\n'
+      printf 'Release install status: not installed\n'
+      if [[ -n "$STATE_CONTROLLER_PATH" && -f "$STATE_CONTROLLER_PATH" ]]; then
+        printf 'Manager status: installed\n'
+        printf 'Hint: run hodexctl install to install release\n'
+      fi
     fi
-    printf '命令目录: %s\n' "$STATE_COMMAND_DIR"
-    printf '管理脚本副本: %s\n' "$STATE_CONTROLLER_PATH"
-    printf 'PATH 处理: %s\n' "$STATE_PATH_UPDATE_MODE"
+    printf 'Command dir: %s\n' "$STATE_COMMAND_DIR"
+    printf 'Manager script copy: %s\n' "$STATE_CONTROLLER_PATH"
+    printf 'PATH update mode: %s\n' "$STATE_PATH_UPDATE_MODE"
+    printf 'PATH managed by hodexctl: %s\n' "$STATE_PATH_MANAGED_BY_HODEXCTL"
+    printf 'PATH source: %s\n' "${STATE_PATH_DETECTED_SOURCE:-<unknown>}"
     if [[ -n "$STATE_PATH_PROFILE" ]]; then
-      printf 'PATH 配置文件: %s\n' "$STATE_PATH_PROFILE"
+      printf 'PATH profile: %s\n' "$STATE_PATH_PROFILE"
     fi
-    printf 'Node 处理选择: %s\n' "$STATE_NODE_SETUP_CHOICE"
-    printf '安装时间: %s\n' "$STATE_INSTALLED_AT"
+    printf 'Node setup choice: %s\n' "$STATE_NODE_SETUP_CHOICE"
+    printf 'Installed at: %s\n' "$STATE_INSTALLED_AT"
     if [[ -x "$STATE_COMMAND_DIR/hodex" ]]; then
-      printf 'hodex 包装器: %s\n' "$STATE_COMMAND_DIR/hodex"
+      printf 'hodex wrapper: %s\n' "$STATE_COMMAND_DIR/hodex"
     fi
     if [[ -x "$STATE_COMMAND_DIR/hodexctl" ]]; then
-      printf 'hodexctl 包装器: %s\n' "$STATE_COMMAND_DIR/hodexctl"
+      printf 'hodexctl wrapper: %s\n' "$STATE_COMMAND_DIR/hodexctl"
     fi
     local active_alias
     active_alias="$(state_get_active_hodex_alias "$state_file")"
-    printf '受管 hodex 指向: %s\n' "${active_alias:-<未设置>}"
-    printf '源码条目数量: %s\n' "$(state_count_source_profiles "$state_file")"
-    while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
+    printf 'Managed hodex target: %s\n' "${active_alias:-<unset>}"
+    printf 'Source profiles: %s\n' "$(state_count_source_profiles "$state_file")"
+    while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at _; do
       [[ -n "$profile_name" ]] || continue
-      printf '源码条目: %s | %s | %s | 仅源码管理\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}"
+      printf 'Source profile: %s | %s | %s | source-only management\n' "$profile_name" "${repo_input:-<unknown>}" "${current_ref:-<unknown>}"
     done < <(state_emit_source_profiles "$state_file")
+
+    if [[ -n "$STATE_CONTROLLER_PATH" && ! -f "$STATE_CONTROLLER_PATH" ]]; then
+      printf 'Diagnostics: manager script copy missing\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_COMMAND_DIR" && ! -x "$STATE_COMMAND_DIR/hodexctl" ]]; then
+      printf 'Diagnostics: hodexctl wrapper missing\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_BINARY_PATH" && ! -f "$STATE_BINARY_PATH" ]]; then
+      printf 'Diagnostics: hodex release binary missing\n'
+      repair_needed=1
+    fi
+    if [[ -n "$STATE_BINARY_PATH" && -f "$STATE_BINARY_PATH" && -n "$STATE_COMMAND_DIR" && ! -x "$STATE_COMMAND_DIR/hodex" ]]; then
+      printf 'Diagnostics: hodex wrapper missing\n'
+      repair_needed=1
+    fi
+    if [[ "$STATE_PATH_DETECTED_SOURCE" == "current-process-only" ]]; then
+      printf 'Diagnostics: PATH is only visible in this shell; new shells may not work\n'
+      repair_needed=1
+    fi
   else
-    printf '正式版安装状态: 未安装\n'
-    printf '源码条目数量: 0\n'
+    printf 'Release install status: not installed\n'
+    printf 'Source profiles: 0\n'
   fi
 
   if command_exists hodex; then
-    printf 'PATH 中的 hodex: %s\n' "$(command -v hodex)"
+    printf 'hodex in PATH: %s\n' "$(command -v hodex)"
   else
-    printf 'PATH 中的 hodex: 未找到\n'
+    printf 'hodex in PATH: not found\n'
+    if [[ -f "$state_file" && -n "$STATE_BINARY_PATH" ]]; then
+      repair_needed=1
+    fi
   fi
 
   if command_exists codex; then
-    printf 'PATH 中的 codex: %s\n' "$(command -v codex)"
+    printf 'codex in PATH: %s\n' "$(command -v codex)"
   else
-    printf 'PATH 中的 codex: 未找到\n'
+    printf 'codex in PATH: not found\n'
   fi
 
   if command_exists node; then
-    printf 'Node.js: %s\n' "$(node -v 2>/dev/null || printf '已安装')"
+    printf 'Node.js: %s\n' "$(node -v 2>/dev/null || printf 'installed')"
   else
-    printf 'Node.js: 未安装\n'
+    printf 'Node.js: not installed\n'
+  fi
+
+  if ((repair_needed)); then
+    printf 'Recommended: run hodexctl repair\n'
   fi
 }
 
 perform_relink() {
   local state_file="$STATE_DIR/state.json"
-  [[ -f "$state_file" ]] || die "未检测到 hodex 安装状态，无法重建链接。"
+  [[ -f "$state_file" ]] || die "No hodex install state found; cannot relink."
 
   load_state_env "$state_file"
 
@@ -6409,9 +6722,28 @@ perform_relink() {
     "$COMMAND_DIR/hodexctl" \
     "$PATH_UPDATE_MODE" \
     "$PATH_PROFILE" \
+    "$PATH_MANAGED_BY_HODEXCTL" \
+    "$PATH_DETECTED_SOURCE" \
     "$STATE_NODE_SETUP_CHOICE" \
     "$STATE_INSTALLED_AT"
-  log_info "已重建正式版与管理脚本包装器到: $COMMAND_DIR"
+  log_info "Rebuilt release and manager wrappers in: $COMMAND_DIR"
+}
+
+perform_repair() {
+  local state_file="$STATE_DIR/state.json"
+  [[ -f "$state_file" ]] || die "No hodex install state found; cannot repair."
+
+  log_step "Repair hodexctl local state"
+  perform_relink
+
+  load_state_env "$state_file"
+  if [[ -n "$STATE_BINARY_PATH" && ! -f "$STATE_BINARY_PATH" ]]; then
+    log_warn "Release binary missing; manager script, wrappers, and PATH were repaired, but the binary cannot be restored offline."
+    log_info "Next: run 'hodexctl install' or 'hodexctl upgrade <version>' to restore the release."
+    return
+  fi
+
+  log_info "Repair completed."
 }
 
 main() {
@@ -6430,20 +6762,20 @@ main() {
 
   case "$COMMAND" in
     install)
-      perform_install_like "$REQUESTED_VERSION" "安装"
+      perform_install_like "$REQUESTED_VERSION" "Install"
       ;;
     upgrade)
-      perform_install_like "$REQUESTED_VERSION" "升级"
+      perform_install_like "$REQUESTED_VERSION" "Upgrade"
       ;;
     download)
       perform_download "$REQUESTED_VERSION"
       ;;
     downgrade)
-      perform_install_like "$REQUESTED_VERSION" "降级"
+      perform_install_like "$REQUESTED_VERSION" "Downgrade"
       ;;
     source)
       if [[ "$SOURCE_ACTION" != "help" ]]; then
-        require_json_backend "源码模式"
+        require_json_backend "source mode"
       fi
       case "$SOURCE_ACTION" in
         install) perform_source_install ;;
@@ -6468,8 +6800,14 @@ main() {
     relink)
       perform_relink
       ;;
+    repair)
+      perform_repair
+      ;;
+    manager-install)
+      perform_manager_install
+      ;;
     *)
-      die "未知命令: $COMMAND"
+      die "Unknown command: $COMMAND"
       ;;
   esac
 }

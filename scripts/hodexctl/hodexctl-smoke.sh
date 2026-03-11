@@ -3,13 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTROLLER_PATH="$SCRIPT_DIR/hodexctl.sh"
+INSTALLER_PATH="$SCRIPT_DIR/../install-hodexctl.sh"
 
 log_step() {
   printf '==> %s\n' "$1"
 }
 
 die() {
-  printf '错误: %s\n' "$1" >&2
+  printf 'Error: %s\n' "$1" >&2
   exit 1
 }
 
@@ -23,12 +24,20 @@ stop_background_process() {
 assert_contains() {
   local file_path="$1"
   local expected="$2"
-  grep -F -- "$expected" "$file_path" >/dev/null 2>&1 || die "未在 ${file_path} 中找到预期内容: ${expected}"
+  grep -F -- "$expected" "$file_path" >/dev/null 2>&1 || die "Expected content not found in ${file_path}: ${expected}"
+}
+
+assert_not_contains() {
+  local file_path="$1"
+  local unexpected="$2"
+  if grep -F -- "$unexpected" "$file_path" >/dev/null 2>&1; then
+    die "Should not appear in ${file_path}: ${unexpected}"
+  fi
 }
 
 assert_not_exists() {
   local file_path="$1"
-  [[ ! -e "$file_path" ]] || die "不应存在: ${file_path}"
+  [[ ! -e "$file_path" ]] || die "Should not exist: ${file_path}"
 }
 
 tmp_dir="$(mktemp -d)"
@@ -54,6 +63,12 @@ nojson_status_output="$tmp_dir/nojson-status.txt"
 activate_error_output="$tmp_dir/activate-error.txt"
 release_install_output="$tmp_dir/release-install.txt"
 release_uninstall_output="$tmp_dir/release-uninstall.txt"
+path_fix_install_output="$tmp_dir/path-fix-install.txt"
+repair_install_output="$tmp_dir/repair-install.txt"
+repair_status_output="$tmp_dir/repair-status.txt"
+repair_output="$tmp_dir/repair-output.txt"
+installer_output="$tmp_dir/installer-output.txt"
+installer_no_path_output="$tmp_dir/installer-no-path-output.txt"
 download_summary_output="$tmp_dir/download-summary.txt"
 gh_fallback_output="$tmp_dir/gh-fallback.txt"
 gh_missing_output="$tmp_dir/gh-missing.txt"
@@ -69,6 +84,12 @@ state_dir="$tmp_dir/state"
 command_dir="$tmp_dir/commands"
 release_state_dir="$tmp_dir/release-state"
 release_command_dir="$tmp_dir/release-commands"
+path_fix_home_dir="$tmp_dir/path-fix-home"
+path_fix_state_dir="$tmp_dir/path-fix-state"
+path_fix_command_dir="$tmp_dir/path-fix-command"
+repair_home_dir="$tmp_dir/repair-home"
+repair_state_dir="$tmp_dir/repair-state"
+repair_command_dir="$tmp_dir/repair-command"
 source_checkout_dir="$tmp_dir/source-checkout"
 source_repo_dir="$tmp_dir/source-repo"
 source_home_dir="$tmp_dir/source-home"
@@ -78,29 +99,29 @@ release_server_root="$tmp_dir/release-server"
 release_server_pid=""
 ghbin="$tmp_dir/gh-bin"
 
-log_step "检查 Bash 语法"
+log_step "Check Bash syntax"
 bash -n "$CONTROLLER_PATH"
 
-log_step "检查空参数帮助输出"
+log_step "Check help output with no args"
 "$CONTROLLER_PATH" >"$help_output"
-assert_contains "$help_output" "用法:"
+assert_contains "$help_output" "Usage:"
 assert_contains "$help_output" "hodexctl list"
 assert_contains "$help_output" "./hodexctl.sh install"
 
-log_step "检查源码模式帮助输出"
+log_step "Check source mode help output"
 "$CONTROLLER_PATH" source help >"$source_help_output"
-assert_contains "$source_help_output" "源码模式用法:"
-assert_contains "$source_help_output" "install                下载源码并准备工具链（不接管 hodex）"
-assert_contains "$source_help_output" "指定源码记录名（工作区标识），默认 codex-source"
+assert_contains "$source_help_output" "Source mode usage:"
+assert_contains "$source_help_output" "install                Download source and prepare toolchain (does not take over hodex)"
+assert_contains "$source_help_output" "Source profile name (default: codex-source)"
 
-log_step "检查 source 子命令 help 语义"
+log_step "Check source/list help semantics"
 "$CONTROLLER_PATH" source install --help >"$source_install_help_output"
 "$CONTROLLER_PATH" list --help >"$list_help_output"
-assert_contains "$source_install_help_output" "源码模式用法:"
-assert_contains "$list_help_output" "版本列表用法:"
-assert_contains "$list_help_output" "更新日志页操作:"
+assert_contains "$source_install_help_output" "Source mode usage:"
+assert_contains "$list_help_output" "Release list usage:"
+assert_contains "$list_help_output" "Changelog view:"
 
-log_step "检查 zsh PATH 目标选择"
+log_step "Check zsh PATH target selection"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" HOME="$tmp_dir/home-path-test" SHELL="/bin/zsh" \
 bash -lc '
   set -euo pipefail
@@ -121,9 +142,9 @@ current_platform_asset="$(
     get_asset_candidates | head -n 1
   '
 )"
-[[ -n "$current_platform_asset" ]] || die "未能解析当前平台 release 资产名"
+[[ -n "$current_platform_asset" ]] || die "Failed to parse current platform release asset name"
 
-log_step "检查 WSL 检测辅助逻辑"
+log_step "Check WSL detection helper"
 printf 'Linux version 6.6.0-microsoft-standard-WSL2\n' >"$tmp_dir/proc-version-wsl"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" HODEXCTL_TEST_PROC_VERSION_FILE="$tmp_dir/proc-version-wsl" \
 bash -lc '
@@ -138,7 +159,7 @@ bash -lc '
 ' >"$tmp_dir/wsl-detect.txt"
 assert_contains "$tmp_dir/wsl-detect.txt" "WSL"
 
-log_step "检查 Linux 资产候选优先 musl"
+log_step "Check Linux asset candidate prefers musl"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" \
 bash -lc '
   set -euo pipefail
@@ -151,18 +172,94 @@ bash -lc '
 assert_contains "$tmp_dir/linux-candidates.txt" "codex-x86_64-unknown-linux-musl"
 assert_contains "$tmp_dir/linux-candidates.txt" "codex-x86_64-unknown-linux-gnu"
 
-log_step "检查未安装状态输出"
+log_step "Check status output when not installed"
 "$CONTROLLER_PATH" status --state-dir "$state_dir" >"$status_output"
-assert_contains "$status_output" "正式版安装状态: 未安装"
-assert_contains "$status_output" "状态目录: $state_dir"
+assert_contains "$status_output" "Release install status: not installed"
+assert_contains "$status_output" "State dir: $state_dir"
 
-log_step "检查源码空状态输出"
+log_step "Check manager-install wrapper keeps custom state dir"
+manager_state_dir="$tmp_dir/manager-state"
+manager_home_dir="$tmp_dir/manager-home"
+manager_status_output="$tmp_dir/manager-status.txt"
+HOME="$manager_home_dir" "$CONTROLLER_PATH" manager-install --state-dir "$manager_state_dir" --yes --no-path-update >"$tmp_dir/manager-install.txt"
+unset HODEX_STATE_DIR HODEXCTL_REPO HODEX_CONTROLLER_URL_BASE || true
+"$manager_state_dir/commands/hodexctl" status >"$manager_status_output"
+assert_contains "$manager_status_output" "State dir: $manager_state_dir"
+
+log_step "Check one-liner installer output (zsh)"
+installer_repo="smoke-repo"
+installer_mirror_root="$tmp_dir/installer-mirror"
+installer_home_dir="$tmp_dir/installer-home"
+installer_state_dir="$tmp_dir/installer-state"
+mkdir -p "$installer_mirror_root/$installer_repo/main/scripts/hodexctl"
+cp "$CONTROLLER_PATH" "$installer_mirror_root/$installer_repo/main/scripts/hodexctl/hodexctl.sh"
+chmod +x "$installer_mirror_root/$installer_repo/main/scripts/hodexctl/hodexctl.sh"
+mkdir -p "$installer_home_dir"
+touch "$installer_home_dir/.zshrc"
+HOME="$installer_home_dir" SHELL="/bin/zsh" HODEX_CONTROLLER_URL_BASE="file://$installer_mirror_root" \
+  HODEXCTL_REPO="$installer_repo" HODEX_STATE_DIR="$installer_state_dir" \
+  bash "$INSTALLER_PATH" >"$installer_output" 2>&1
+assert_contains "$installer_output" "==> Install complete"
+assert_contains "$installer_output" "$installer_state_dir/commands/hodexctl status"
+assert_contains "$installer_output" "source \"$installer_home_dir/.zshrc\""
+
+log_step "Check installer skip PATH update doesn't print source"
+installer_state_dir_no_path="$tmp_dir/installer-state-no-path"
+HOME="$installer_home_dir" SHELL="/bin/zsh" HODEXCTL_NO_PATH_UPDATE=1 HODEX_CONTROLLER_URL_BASE="file://$installer_mirror_root" \
+  HODEXCTL_REPO="$installer_repo" HODEX_STATE_DIR="$installer_state_dir_no_path" \
+  bash "$INSTALLER_PATH" >"$installer_no_path_output" 2>&1
+assert_contains "$installer_no_path_output" "==> Install complete"
+assert_contains "$installer_no_path_output" "$installer_state_dir_no_path/commands/hodexctl status"
+assert_not_contains "$installer_no_path_output" "source \""
+
+log_step "Check legacy state.json uninstall still clears PATH block"
+legacy_home_dir="$tmp_dir/legacy-home"
+legacy_state_dir="$tmp_dir/legacy-state"
+legacy_command_dir="$legacy_state_dir/commands"
+legacy_controller_path="$legacy_state_dir/libexec/hodexctl.sh"
+mkdir -p "$legacy_home_dir" "$legacy_command_dir" "$(dirname "$legacy_controller_path")"
+legacy_profile_file="$legacy_home_dir/.zshrc"
+{
+  printf 'export HODEX_SMOKE_SENTINEL=1\n'
+  printf '%s\n' "# >>> hodexctl >>>"
+  printf 'export PATH="%s:$PATH"\n' "$legacy_command_dir"
+  printf '%s\n' "# <<< hodexctl <<<"
+  printf 'export HODEX_SMOKE_SENTINEL_END=1\n'
+} >"$legacy_profile_file"
+touch "$legacy_command_dir/hodexctl"
+touch "$legacy_controller_path"
+cat >"$legacy_state_dir/state.json" <<JSON
+{
+  "schema_version": 2,
+  "repo": "stellarlinkco/codex",
+  "installed_version": "",
+  "release_tag": "",
+  "release_name": "",
+  "asset_name": "",
+  "binary_path": "",
+  "controller_path": "$legacy_controller_path",
+  "command_dir": "$legacy_command_dir",
+  "wrappers_created": [],
+  "path_update_mode": "added",
+  "path_profile": "$legacy_profile_file",
+  "node_setup_choice": "",
+  "installed_at": "2026-03-09T00:00:00Z",
+  "source_profiles": {},
+  "active_runtime_aliases": {}
+}
+JSON
+HOME="$legacy_home_dir" SHELL="/bin/zsh" "$CONTROLLER_PATH" uninstall --state-dir "$legacy_state_dir" >"$tmp_dir/legacy-uninstall.txt" 2>&1
+assert_contains "$legacy_profile_file" "export HODEX_SMOKE_SENTINEL=1"
+assert_contains "$legacy_profile_file" "export HODEX_SMOKE_SENTINEL_END=1"
+assert_not_contains "$legacy_profile_file" "# >>> hodexctl >>>"
+
+log_step "Check empty source status output"
 "$CONTROLLER_PATH" source status --state-dir "$state_dir" >"$source_status_output"
 "$CONTROLLER_PATH" source list --state-dir "$state_dir" >"$source_list_output"
-assert_contains "$source_status_output" "未安装任何源码条目"
-assert_contains "$source_list_output" "当前没有已记录的源码条目"
+assert_contains "$source_status_output" "No source profiles installed"
+assert_contains "$source_list_output" "No source profiles recorded"
 
-log_step "检查 list 顶部源码入口"
+log_step "Check list top source entry"
 listbin="$tmp_dir/list-bin"
 mkdir -p "$listbin"
 for cmd in bash basename dirname mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less python3 jq; do
@@ -235,9 +332,9 @@ fi
 EOF
 chmod +x "$listbin/curl"
 PATH="$listbin" CURRENT_PLATFORM_ASSET="$current_platform_asset" "$CONTROLLER_PATH" list --state-dir "$state_dir" >"$list_output"
-assert_contains "$list_output" "0. 源码模式"
+assert_contains "$list_output" "0. Source mode"
 
-log_step "检查 Bash 下载完成摘要"
+log_step "Check Bash download summary"
 downloadbin="$tmp_dir/download-bin"
 mkdir -p "$downloadbin"
 for cmd in bash basename dirname mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less python3 jq; do
@@ -287,10 +384,10 @@ fi
 EOF
 chmod +x "$downloadbin/curl"
 PATH="$downloadbin" HODEX_RELEASE_BASE_URL="https://example.invalid/releases" "$CONTROLLER_PATH" download latest --download-dir "$tmp_dir/downloads" >"$download_summary_output"
-assert_contains "$download_summary_output" "下载完成:"
-assert_contains "$download_summary_output" "平均速度"
+assert_contains "$download_summary_output" "Download complete:"
+assert_contains "$download_summary_output" "avg"
 
-log_step "检查 Bash 候选输入提示不会污染返回值"
+log_step "Check choice prompt does not pollute return value"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" \
 bash -lc '
   set -euo pipefail
@@ -299,13 +396,13 @@ bash -lc '
   reset_choice_candidates
   append_choice_candidate "alpha"
   append_choice_candidate "beta"
-  printf "2\n" | prompt_value_with_choice_candidates "测试字段" "default" "测试备注"
+  printf "2\n" | prompt_value_with_choice_candidates "Test field" "default" "Test note"
 ' >"$choice_stdout" 2>"$choice_stderr"
 assert_contains "$choice_stdout" "beta"
-assert_contains "$choice_stderr" "测试字段"
-assert_contains "$choice_stderr" "可选项:"
+assert_contains "$choice_stderr" "Test field"
+assert_contains "$choice_stderr" "Candidates:"
 
-log_step "检查 release changelog 总结优先调用 hodex"
+log_step "Check release changelog summary prefers hodex"
 summary_bin="$tmp_dir/summary-bin"
 mkdir -p "$summary_bin"
 cat >"$summary_bin/hodex" <<'EOF'
@@ -316,13 +413,13 @@ if [[ "${1:-}" == "exec" && "${2:-}" == "--help" ]]; then
 fi
 printf '%s\n' "$*" >"$TRACE_ARGS_FILE"
 cat >"$TRACE_PROMPT_FILE"
-printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"这是 hodex 总结结果"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"This is the hodex summary result"}}'
 EOF
 chmod +x "$summary_bin/hodex"
 cat >"$summary_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "不应调用 codex" >&2
+echo "codex should not be called" >&2
 exit 1
 EOF
 chmod +x "$summary_bin/codex"
@@ -359,16 +456,17 @@ bash -lc '
 JSON
   summarize_release_changelog "$release_file" "1.2.3" >"$SUMMARY_OUTPUT_FILE" 2>&1
 '
-assert_contains "$release_summary_output" "这是 hodex 总结结果"
+assert_contains "$release_summary_output" "This is the hodex summary result"
 assert_contains "$release_summary_args" "exec --skip-git-repo-check --color never --json -"
-assert_contains "$release_summary_prompt" "版本: 1.2.3"
-assert_contains "$release_summary_prompt" "完整 changelog:"
-assert_contains "$release_summary_prompt" "新增功能"
-assert_contains "$release_summary_prompt" "修复内容"
-assert_contains "$release_summary_prompt" "破坏性变更 / 迁移要求"
+assert_contains "$release_summary_prompt" "Version: 1.2.3"
+assert_contains "$release_summary_prompt" "Full changelog:"
+assert_contains "$release_summary_prompt" "New features"
+assert_contains "$release_summary_prompt" "Improvements"
+assert_contains "$release_summary_prompt" "Fixes"
+assert_contains "$release_summary_prompt" "Breaking changes / migration"
 assert_contains "$release_summary_prompt" "- add feature A"
 
-log_step "检查 release changelog 总结会回退到 codex"
+log_step "Check release changelog summary falls back to codex"
 fallback_bin="$tmp_dir/summary-fallback-bin"
 mkdir -p "$fallback_bin"
 cat >"$fallback_bin/hodex" <<'EOF'
@@ -388,7 +486,7 @@ if [[ "${1:-}" == "exec" && "${2:-}" == "--help" ]]; then
 fi
 printf '%s\n' "$*" >"$TRACE_ARGS_FILE"
 cat >/dev/null
-printf '%s\n' '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"这是 codex 回退总结结果"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"This is the codex fallback summary"}}'
 EOF
 chmod +x "$fallback_bin/codex"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" \
@@ -423,11 +521,11 @@ bash -lc '
 JSON
   summarize_release_changelog "$release_file" "2.0.0" >"$SUMMARY_OUTPUT_FILE" 2>&1
 '
-assert_contains "$release_summary_fallback_output" "这是 codex 回退总结结果"
-assert_contains "$release_summary_fallback_output" "已自动改用 codex"
+assert_contains "$release_summary_fallback_output" "This is the codex fallback summary"
+assert_contains "$release_summary_fallback_output" "Preferred command unavailable; switched to codex."
 assert_contains "$release_summary_fallback_args" "exec --skip-git-repo-check --color never --json -"
 
-log_step "检查 GitHub API 403 时自动回退 gh"
+log_step "Check gh fallback on GitHub API 403"
 mkdir -p "$ghbin"
 for cmd in bash basename dirname mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less python3 jq; do
   if command -v "$cmd" >/dev/null 2>&1; then
@@ -480,10 +578,10 @@ exit 1
 EOF
 chmod +x "$ghbin/gh"
 PATH="$ghbin" CURRENT_PLATFORM_ASSET="$current_platform_asset" "$CONTROLLER_PATH" list --state-dir "$state_dir" >"$gh_fallback_output"
-assert_contains "$gh_fallback_output" "0. 源码模式"
-assert_contains "$gh_fallback_output" "已自动改用 gh api 获取 GitHub 数据。"
+assert_contains "$gh_fallback_output" "0. Source mode"
+assert_contains "$gh_fallback_output" "Automatically switched to gh api for GitHub data."
 
-log_step "检查 GitHub API 403 且 gh 不可用时的提示"
+log_step "Check message when GitHub API 403 and gh is missing"
 mkdir -p "$tmp_dir/gh-missing-bin"
 for cmd in bash basename dirname mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less python3 jq; do
   if command -v "$cmd" >/dev/null 2>&1; then
@@ -509,11 +607,11 @@ fi
 EOF
 chmod +x "$tmp_dir/gh-missing-bin/curl"
 if PATH="$tmp_dir/gh-missing-bin" "$CONTROLLER_PATH" list --state-dir "$state_dir" >"$gh_missing_output" 2>&1; then
-  die "gh 缺失时的 403 场景不应成功"
+  die "403 scenario should not succeed when gh is missing"
 fi
-assert_contains "$gh_missing_output" "当前未检测到 gh"
+assert_contains "$gh_missing_output" "gh is not available"
 
-log_step "检查 GitHub API 403 且 gh 未登录时的提示"
+log_step "Check message when GitHub API 403 and gh is not authenticated"
 mkdir -p "$tmp_dir/gh-auth-bin"
 for cmd in bash basename dirname mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less python3 jq; do
   if command -v "$cmd" >/dev/null 2>&1; then
@@ -529,12 +627,12 @@ exit 1
 EOF
 chmod +x "$tmp_dir/gh-auth-bin/gh"
 if PATH="$tmp_dir/gh-auth-bin" "$CONTROLLER_PATH" list --state-dir "$state_dir" >"$gh_auth_output" 2>&1; then
-  die "gh 未登录时的 403 场景不应成功"
+  die "403 scenario should not succeed when gh is not authenticated"
 fi
-assert_contains "$gh_auth_output" "gh 未登录"
+assert_contains "$gh_auth_output" "gh is not authenticated"
 assert_contains "$gh_auth_output" "gh auth login"
 
-log_step "检查无 python3/jq 时 release-only 状态输出"
+log_step "Check release-only status output without python3/jq"
 tmpbin="$tmp_dir/minimal-bin"
 mkdir -p "$tmpbin"
 for cmd in bash basename dirname curl mktemp chmod mkdir cp install awk grep date sleep uname sed head wc tr cat rm mv tput shasum sha256sum openssl git perl less; do
@@ -543,19 +641,19 @@ for cmd in bash basename dirname curl mktemp chmod mkdir cp install awk grep dat
   fi
 done
 PATH="$tmpbin" "$CONTROLLER_PATH" status --state-dir "$state_dir" >"$nojson_status_output"
-assert_contains "$nojson_status_output" "正式版安装状态: 未安装"
+assert_contains "$nojson_status_output" "Release install status: not installed"
 
-log_step "检查源码模式拒绝接管 hodex"
+log_step "Check source mode refuses to take over hodex"
 if "$CONTROLLER_PATH" source install --activate --state-dir "$state_dir" >"$activate_error_output" 2>&1; then
-  die "源码模式不应接受 --activate"
+  die "Source mode should not accept --activate"
 fi
-assert_contains "$activate_error_output" "源码模式不允许接管 hodex"
+assert_contains "$activate_error_output" "Source mode will not take over hodex"
 
-log_step "检查源码菜单新交互文案"
-assert_contains "$list_output" "源码下载 / 管理"
-assert_contains "$source_help_output" "指定源码记录名（工作区标识），默认 codex-source"
+log_step "Check source menu copy"
+assert_contains "$list_output" "Source download/management"
+assert_contains "$source_help_output" "Source profile name (default: codex-source)"
 
-log_step "检查 release-only 安装与卸载清理"
+log_step "Check release-only install and uninstall cleanup"
 mkdir -p "$release_server_root/latest/download"
 cat >"$release_server_root/latest/download/${current_platform_asset}" <<'EOF'
 #!/usr/bin/env bash
@@ -581,22 +679,58 @@ HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" insta
   --no-path-update \
   --state-dir "$release_state_dir" \
   --command-dir "$release_command_dir" >"$release_install_output" 2>&1
-assert_contains "$release_install_output" "安装完成"
+assert_contains "$release_install_output" "Install complete:"
 test -x "$release_command_dir/hodex"
 test -x "$release_command_dir/hodexctl"
 HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" uninstall \
   --state-dir "$release_state_dir" >"$release_uninstall_output" 2>&1
-assert_contains "$release_uninstall_output" "已删除正式版二进制、包装器和安装状态。"
+assert_contains "$release_uninstall_output" "Removed release binary, wrappers, and install state."
 assert_not_exists "$release_command_dir/hodex"
 assert_not_exists "$release_command_dir/hodexctl"
 assert_not_exists "$release_state_dir/state.json"
+
+log_step "Check current-process-only install auto persists PATH"
+mkdir -p "$path_fix_home_dir" "$path_fix_command_dir"
+HOME="$path_fix_home_dir" PATH="$path_fix_command_dir:/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" install \
+  --yes \
+  --state-dir "$path_fix_state_dir" \
+  --command-dir "$path_fix_command_dir" >"$path_fix_install_output" 2>&1
+assert_contains "$path_fix_state_dir/state.json" "\"path_detected_source\": \"managed-profile-block\""
+assert_contains "$path_fix_home_dir/.zshrc" "# >>> hodexctl >>>"
+assert_contains "$path_fix_home_dir/.zprofile" "# >>> hodexctl >>>"
+env -i HOME="$path_fix_home_dir" USER="$USER" SHELL=/bin/zsh TERM=xterm-256color PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  bash -lc 'source ~/.zprofile >/dev/null 2>&1 || true; source ~/.zshrc >/dev/null 2>&1 || true; command -v hodex; hodex --version' >"$tmp_dir/path-fix-shell.txt"
+assert_contains "$tmp_dir/path-fix-shell.txt" "$path_fix_command_dir/hodex"
+assert_contains "$tmp_dir/path-fix-shell.txt" "codex-cli 9.9.9"
+
+log_step "Check repair fixes install without persisted PATH"
+mkdir -p "$repair_home_dir" "$repair_command_dir"
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+HODEX_RELEASE_BASE_URL="http://127.0.0.1:$release_port" "$CONTROLLER_PATH" install \
+  --yes \
+  --no-path-update \
+  --state-dir "$repair_state_dir" \
+  --command-dir "$repair_command_dir" >"$repair_install_output" 2>&1
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+"$CONTROLLER_PATH" status --state-dir "$repair_state_dir" --command-dir "$repair_command_dir" >"$repair_status_output"
+assert_contains "$repair_status_output" "Recommended: run hodexctl repair"
+HOME="$repair_home_dir" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="/bin/zsh" \
+"$CONTROLLER_PATH" repair --yes --state-dir "$repair_state_dir" --command-dir "$repair_command_dir" >"$repair_output" 2>&1
+assert_contains "$repair_output" "Repair completed."
+assert_contains "$repair_home_dir/.zshrc" "# >>> hodexctl >>>"
+env -i HOME="$repair_home_dir" USER="$USER" SHELL=/bin/zsh TERM=xterm-256color PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  bash -lc 'source ~/.zprofile >/dev/null 2>&1 || true; source ~/.zshrc >/dev/null 2>&1 || true; command -v hodex; hodex --version' >"$tmp_dir/repair-shell.txt"
+assert_contains "$tmp_dir/repair-shell.txt" "$repair_command_dir/hodex"
+assert_contains "$tmp_dir/repair-shell.txt" "codex-cli 9.9.9"
+
 stop_background_process "$release_server_pid"
 release_server_pid=""
 trap 'rm -rf "$tmp_dir"' EXIT
 
-log_step "检查源码模式本地闭环同步"
+log_step "Check source mode local loopback sync"
 if ! command -v git >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1 || { ! command -v python3 >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; }; then
-  log_step "环境缺少 git/cargo/rustc/python3|jq，跳过源码闭环集成测试"
+  log_step "Missing git/cargo/rustc/python3|jq; skip source loopback integration test"
 else
   mkdir -p "$source_repo_dir/src" "$command_dir" "$source_home_dir"
   mkdir -p "$source_bin"
@@ -641,22 +775,22 @@ EOF
     --profile smoke-source \
     --ref main \
     --checkout-dir "$source_checkout_dir" >"$source_install_output" 2>&1
-  assert_contains "$source_install_output" "结果摘要"
-  assert_contains "$source_install_output" "源码记录名: smoke-source"
-  assert_contains "$source_install_output" "当前 ref: main"
+  assert_contains "$source_install_output" "Result summary"
+  assert_contains "$source_install_output" "Source profile: smoke-source"
+  assert_contains "$source_install_output" "Current ref: main"
   test -d "$source_checkout_dir/.git"
   test -x "$command_dir/hodexctl"
   assert_contains "$source_profile_file" "# >>> hodexctl >>>"
   install_head="$(git -C "$source_checkout_dir" rev-parse HEAD)"
   repo_head="$(git -C "$source_repo_dir" rev-parse HEAD)"
-  [[ "$install_head" == "$repo_head" ]] || die "源码安装后 checkout HEAD 不一致"
+  [[ "$install_head" == "$repo_head" ]] || die "Source install checkout HEAD mismatch"
 
   PATH="$source_bin:$PATH" HOME="$source_home_dir" SHELL="/bin/zsh" RUSTUP_HOME="${RUSTUP_HOME:-$original_home/.rustup}" CARGO_HOME="${CARGO_HOME:-$original_home/.cargo}" "$CONTROLLER_PATH" source status \
     --yes \
     --state-dir "$state_dir" \
     --command-dir "$command_dir" >"$source_status_after_install_output" 2>&1
-  assert_contains "$source_status_after_install_output" "名称: smoke-source"
-  assert_contains "$source_status_after_install_output" "模式: 仅管理源码 checkout 与工具链，不生成源码命令入口"
+  assert_contains "$source_status_after_install_output" "Name: smoke-source"
+  assert_contains "$source_status_after_install_output" "Mode: manage checkout and toolchain only; no source command wrappers generated"
 
   cat >"$source_repo_dir/src/main.rs" <<'EOF'
 fn main() {
@@ -670,10 +804,10 @@ EOF
     --yes \
     --state-dir "$state_dir" \
     --command-dir "$command_dir" >"$source_update_output" 2>&1
-  assert_contains "$source_update_output" "更新源码"
+  assert_contains "$source_update_output" "Action: Update source"
   update_head="$(git -C "$source_checkout_dir" rev-parse HEAD)"
   repo_head="$(git -C "$source_repo_dir" rev-parse HEAD)"
-  [[ "$update_head" == "$repo_head" ]] || die "源码更新后 checkout HEAD 不一致"
+  [[ "$update_head" == "$repo_head" ]] || die "Source update checkout HEAD mismatch"
 
   git -C "$source_repo_dir" checkout -b feature-smoke-switch >/dev/null
   CONTROLLER_PATH_ENV="$CONTROLLER_PATH" STATE_FILE_ENV="$state_dir/state.json" REPO_ENV="$source_repo_dir" PROFILE_ENV="smoke-source" CHECKOUT_ENV="$source_checkout_dir" \
@@ -686,7 +820,7 @@ EOF
     ' >"$source_ref_candidates_output"
   assert_contains "$source_ref_candidates_output" "feature-smoke-switch"
   if grep -F -- "smoke-tag" "$source_ref_candidates_output" >/dev/null 2>&1; then
-    die "branch 候选列表不应默认混入 tag"
+    die "Branch candidates should not include tags by default"
   fi
 
   PATH="$source_bin:$PATH" HOME="$source_home_dir" SHELL="/bin/zsh" RUSTUP_HOME="${RUSTUP_HOME:-$original_home/.rustup}" CARGO_HOME="${CARGO_HOME:-$original_home/.cargo}" "$CONTROLLER_PATH" source switch \
@@ -694,30 +828,30 @@ EOF
     --state-dir "$state_dir" \
     --command-dir "$command_dir" \
     --ref feature-smoke-switch >"$source_rebuild_output" 2>&1
-  assert_contains "$source_rebuild_output" "切换 ref 并同步源码"
+  assert_contains "$source_rebuild_output" "Action: Switch ref and sync source"
   switch_head="$(git -C "$source_checkout_dir" rev-parse --abbrev-ref HEAD)"
-  [[ "$switch_head" == "feature-smoke-switch" ]] || die "源码切换 ref 后分支不正确"
+  [[ "$switch_head" == "feature-smoke-switch" ]] || die "Source switch ref branch mismatch"
 
   if PATH="$source_bin:$PATH" HOME="$source_home_dir" SHELL="/bin/zsh" RUSTUP_HOME="${RUSTUP_HOME:-$original_home/.rustup}" CARGO_HOME="${CARGO_HOME:-$original_home/.cargo}" "$CONTROLLER_PATH" source rebuild \
     --yes \
     --state-dir "$state_dir" \
     --command-dir "$command_dir" >"$source_rebuild_output" 2>&1; then
-    die "source rebuild 已移除，不应成功"
+    die "source rebuild was removed; should not succeed"
   fi
-  assert_contains "$source_rebuild_output" "source rebuild 已移除"
+  assert_contains "$source_rebuild_output" "source rebuild has been removed"
 
   PATH="$source_bin:$PATH" HOME="$source_home_dir" SHELL="/bin/zsh" RUSTUP_HOME="${RUSTUP_HOME:-$original_home/.rustup}" CARGO_HOME="${CARGO_HOME:-$original_home/.cargo}" "$CONTROLLER_PATH" source uninstall \
     --yes \
     --keep-checkout \
     --state-dir "$state_dir" \
     --command-dir "$command_dir" >"$source_uninstall_output" 2>&1
-  assert_contains "$source_uninstall_output" "卸载源码条目"
+  assert_contains "$source_uninstall_output" "Source profile uninstalled"
   test -d "$source_checkout_dir"
   assert_not_exists "$command_dir/smoke-source"
   assert_not_exists "$command_dir/hodexctl"
   if grep -F "# >>> hodexctl >>>" "$source_profile_file" >/dev/null 2>&1; then
-    die "源码 profile 全部卸载后不应保留 PATH block"
+    die "PATH block should not remain after all source profiles are uninstalled"
   fi
 fi
 
-log_step "Smoke 测试通过"
+log_step "Smoke test passed"

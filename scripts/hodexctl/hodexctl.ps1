@@ -42,6 +42,8 @@ $script:ArchitectureName = ""
 $script:AssetCandidates = @()
 $script:PathUpdateMode = "skipped"
 $script:PathProfile = ""
+$script:PathManagedByHodexctl = $false
+$script:PathDetectedSource = ""
 $script:NodeSetupChoice = "skip"
 $script:State = $null
 $script:RequestedCommand = $Command
@@ -72,51 +74,52 @@ $script:ExplicitSourceRef = $PSBoundParameters.ContainsKey("Ref")
 $script:RawSourceHelpRequest = ($Command -eq "source" -and $Version -eq "help")
 
 if ($PSBoundParameters.ContainsKey("Name")) {
-    Write-Warning "-Name 已废弃，请改用 -Profile。"
+    Write-Warning "-Name is deprecated; use -Profile."
 }
 
 if ($Activate -or $NoActivate) {
-    throw "源码模式不允许接管 hodex；源码 checkout 仅用于同步与工具链管理。"
+    throw "Source mode does not take over hodex; source checkout is for sync and toolchain management only."
 }
 
 function Show-Usage {
     $standaloneCommand = ".\hodexctl.ps1"
     @"
-用法:
+Usage:
   $($script:DisplayCommand)
   $($script:DisplayCommand) <command> [version] [options]
 
-命令:
-  install [version]      初始安装或重装 hodex，默认安装 latest
-  upgrade [version]      升级到 latest 或指定版本
-  download [version]     下载当前平台资产到下载目录，默认 latest
-  downgrade <version>    降级到指定版本
-  source <action>        源码下载/同步/工具链管理
-  uninstall              卸载 hodex 相关文件
-  status                 查看当前安装状态
-  list                   交互式列出当前平台可下载版本，并支持查看更新日志
-  relink                 重新生成 hodex / hodexctl 包装器
-  help                   显示帮助
+Commands:
+  install [version]      Install or reinstall hodex (default: latest)
+  upgrade [version]      Upgrade to latest or a specific version
+  download [version]     Download release asset to download dir (default: latest)
+  downgrade <version>    Downgrade to a specific version
+  source <action>        Source download/sync/toolchain management
+  uninstall              Remove hodex files
+  status                 Show current install status
+  list                   Interactive list of available versions with changelog
+  relink                 Regenerate hodex / hodexctl wrappers
+  repair                 Repair wrapper / PATH / state drift
+  help                   Show help
 
-选项:
-  -Repo <owner/repo>             指定 GitHub 仓库，默认 stellarlinkco/codex
-  -CommandDir <path>             指定生成 hodex / hodexctl 的目录
-  -StateDir <path>               指定状态目录，默认 %LOCALAPPDATA%\hodex
-  -DownloadDir <path>            指定下载目录，默认 ~/Downloads
-  -NodeMode <mode>               Node 处理策略：ask|skip|native|nvm|manual
-  -GitUrl <url>                  源码模式指定 Git clone 地址
-  -Ref <branch|tag|commit>       源码模式指定分支、标签或提交，默认 main
-  -CheckoutDir <path>            源码模式指定 checkout 目录
-  -Profile <profile-name>        源码模式指定源码记录名，默认 codex-source
-  -KeepCheckout                  源码卸载时保留源码目录
-  -RemoveCheckout                源码卸载时删除源码目录
-  -List                          等价于 list
-  -Yes                           非交互模式，使用默认选项
-  -NoPathUpdate                  不自动修改 PATH
-  -GitHubToken <token>           GitHub API Token，缓解速率限制
-  -Help                          显示帮助
+Options:
+  -Repo <owner/repo>             GitHub repo (default: stellarlinkco/codex)
+  -CommandDir <path>             Command dir for hodex / hodexctl
+  -StateDir <path>               State dir (default: %LOCALAPPDATA%\hodex)
+  -DownloadDir <path>            Download dir (default: ~/Downloads)
+  -NodeMode <mode>               Node handling: ask|skip|native|nvm|manual
+  -GitUrl <url>                  Source mode Git clone URL
+  -Ref <branch|tag|commit>       Source mode ref (default: main)
+  -CheckoutDir <path>            Source mode checkout dir
+  -Profile <profile-name>        Source profile name (default: codex-source)
+  -KeepCheckout                  Keep checkout on source uninstall
+  -RemoveCheckout                Remove checkout on source uninstall
+  -List                          Same as list
+  -Yes                           Non-interactive (accept defaults)
+  -NoPathUpdate                  Do not modify PATH
+  -GitHubToken <token>           GitHub API token (mitigate rate limit)
+  -Help                          Show help
 
-示例（已安装后，推荐通过 hodexctl 使用）:
+Examples (after install, recommended via hodexctl):
   hodexctl
   hodexctl status
   hodexctl list
@@ -128,9 +131,10 @@ function Show-Usage {
   hodexctl source status
   hodexctl source list
   hodexctl relink -CommandDir %LOCALAPPDATA%\hodex\commands
+  hodexctl repair
   hodexctl uninstall
 
-示例（独立下载脚本后直接运行）:
+Examples (run script directly):
   $standaloneCommand install
   $standaloneCommand install 1.2.2
   $standaloneCommand upgrade
@@ -139,51 +143,52 @@ function Show-Usage {
   $standaloneCommand downgrade 1.2.2
   $standaloneCommand source install -GitUrl https://github.com/stellarlinkco/codex.git -Ref main
   $standaloneCommand relink -CommandDir %LOCALAPPDATA%\hodex\commands
+  $standaloneCommand repair
   $standaloneCommand uninstall
 "@ | Write-Host
 }
 
 function Show-SourceUsage {
     @"
-源码模式用法:
+Source mode usage:
   $($script:DisplayCommand) source <action> [options]
 
-动作:
-  install                下载源码并准备工具链（不接管 hodex）
-  update                 同步当前 ref 最新代码并复用现有 checkout
-  switch                 切换到指定 -Ref 并同步源码
-  status                 查看源码记录状态
-  uninstall              移除源码记录，可选删除 checkout
-  list                   列出所有源码记录
-  help                   显示本帮助
+Actions:
+  install                Download source and prepare toolchain (does not take over hodex)
+  update                 Sync latest code for current ref and reuse checkout
+  switch                 Switch to specified -Ref and sync source
+  status                 Show source profile status
+  uninstall              Remove source profile; optional checkout deletion
+  list                   List all source profiles
+  help                   Show this help
 
-常用选项:
-  -Repo <owner/repo>             使用 GitHub 仓库名
-  -GitUrl <url>                  使用 HTTPS / SSH Git URL
-  -Ref <branch|tag|commit>       指定源码分支、标签或提交
-  -CheckoutDir <path>            指定源码 checkout 目录
-  -Profile <profile-name>        指定源码记录名（工作区标识），默认 codex-source
-                                  备注: 这不是命令名，也不会接管 hodex
-  -KeepCheckout / -RemoveCheckout 控制卸载时是否保留源码目录
+Common options:
+  -Repo <owner/repo>             GitHub repo name
+  -GitUrl <url>                  HTTPS / SSH Git URL
+  -Ref <branch|tag|commit>       Source ref
+  -CheckoutDir <path>            Source checkout dir
+  -Profile <profile-name>        Source profile name (workspace id), default codex-source
+                                  Note: this is not a command name and does not take over hodex
+  -KeepCheckout / -RemoveCheckout Control whether to keep checkout on uninstall
 "@ | Write-Host
 }
 
 function Show-ListUsage {
     @"
-版本列表用法:
+Release list usage:
   $($script:DisplayCommand) list
 
-列表页操作:
-  输入编号查看更新日志
-  输入 0 进入源码下载 / 管理
-  直接回车退出
+List view actions:
+  Enter number to view changelog
+  Enter 0 to open source download/management
+  Press Enter to exit
 
-更新日志页操作:
-  a        AI总结（调用 hodex/codex）
-  i        安装当前版本
-  d        下载当前平台资产
-  b        返回版本列表
-  q        退出
+Changelog view actions:
+  a        AI summary (hodex/codex)
+  i        Install selected version
+  d        Download asset for current platform
+  b        Back to version list
+  q        Quit
 "@ | Write-Host
 }
 
@@ -325,7 +330,7 @@ function Invoke-GhApiFallback {
         & gh @argumentList 1> $stdoutFile 2> $stderrFile
         if ($LASTEXITCODE -eq 0) {
             $script:LastGhFallbackReason = "gh-success"
-            $script:LastGhFallbackDetail = "已自动改用 gh api 获取 GitHub 数据。"
+            $script:LastGhFallbackDetail = "Automatically switched to gh api to fetch GitHub data."
             $json = Get-Content -LiteralPath $stdoutFile -Raw
             return $json | ConvertFrom-Json -Depth 100
         }
@@ -354,15 +359,15 @@ function Get-GitHubApiFailureMessage {
 
     switch ($script:LastGhFallbackReason) {
         "gh-success" { return "$BaseMessage`n$($script:LastGhFallbackDetail)" }
-        "gh-missing" { return "$BaseMessage。当前未检测到 gh，可设置 GITHUB_TOKEN 或安装并登录 gh 后重试。" }
-        "gh-not-authenticated" { return "$BaseMessage。已尝试 gh 兜底，但 gh 未登录；请执行 gh auth login，或设置 GITHUB_TOKEN 后重试。" }
-        "gh-access-denied" { return "$BaseMessage。已尝试 gh 兜底，但当前 gh 登录态或 token 对仓库 $($script:RepoName) 没有足够权限：$($script:LastGhFallbackDetail)" }
-        "gh-failed" { return "$BaseMessage。已尝试 gh 兜底，但 gh api 仍失败：$($script:LastGhFallbackDetail)" }
+        "gh-missing" { return "$BaseMessage. gh not found; set GITHUB_TOKEN or install/login to gh and retry." }
+        "gh-not-authenticated" { return "$BaseMessage. gh fallback was attempted but gh is not logged in; run 'gh auth login' or set GITHUB_TOKEN and retry." }
+        "gh-access-denied" { return "$BaseMessage. gh fallback was attempted but the current gh login/token lacks permission for $($script:RepoName): $($script:LastGhFallbackDetail)" }
+        "gh-failed" { return "$BaseMessage. gh fallback was attempted but gh api still failed: $($script:LastGhFallbackDetail)" }
         default {
             if (-not [string]::IsNullOrWhiteSpace($script:ApiToken)) {
-                return "$BaseMessage。已提供 GITHUB_TOKEN，但 GitHub API 仍不可用；也可尝试 gh auth login 后重试。"
+                return "$BaseMessage. GITHUB_TOKEN was provided, but GitHub API is still unavailable; you can also try 'gh auth login' and retry."
             }
-            return "$BaseMessage。可设置 GITHUB_TOKEN，或安装并登录 gh 后重试。"
+            return "$BaseMessage. Set GITHUB_TOKEN or install/login to gh and retry."
         }
     }
 }
@@ -444,7 +449,7 @@ function Invoke-WithRetry {
             if ($attempt -ge $maxAttempts -or -not (Test-RetryableError -Label $Label -ErrorText $message)) {
                 throw
             }
-            Write-WarnLine "$Label 失败，将在 ${delaySeconds}s 后重试（$attempt/$maxAttempts）：$(Get-RetryErrorSummary -ErrorText $message)"
+            Write-WarnLine "$Label failed; retrying in ${delaySeconds}s ($attempt/$maxAttempts): $(Get-RetryErrorSummary -ErrorText $message)"
             Start-Sleep -Seconds $delaySeconds
             $delaySeconds += $delayStep
         }
@@ -557,10 +562,10 @@ function Invoke-DownloadWithProgress {
                         $speedText = (Format-ByteSize ($bytesReadTotal / $seconds)) + "/s"
                         if ($totalBytes) {
                             $percent = [Math]::Min([int](($bytesReadTotal * 100) / $totalBytes), 100)
-                            $status = "{0}% | {1} / {2} | 速度 {3}" -f $percent, (Format-ByteSize $bytesReadTotal), (Format-ByteSize $totalBytes), $speedText
+                            $status = "{0}% | {1} / {2} | Speed {3}" -f $percent, (Format-ByteSize $bytesReadTotal), (Format-ByteSize $totalBytes), $speedText
                             Write-Progress -Activity $Label -Status $status -PercentComplete $percent
                         } else {
-                            $status = "{0} | 速度 {1}" -f (Format-ByteSize $bytesReadTotal), $speedText
+                            $status = "{0} | Speed {1}" -f (Format-ByteSize $bytesReadTotal), $speedText
                             Write-Progress -Activity $Label -Status $status -PercentComplete -1
                         }
                     }
@@ -727,14 +732,14 @@ function Ensure-DirWritable {
     try {
         Set-Content -Path $probe -Value "ok" -Encoding ASCII
     } catch {
-        Fail "目录不可写: $Path"
+        Fail "Directory not writable: $Path"
     } finally {
         Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Normalize-Parameters {
-    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "help")
+    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "repair", "help", "manager-install")
 
     if ($script:InvokedWithNoArgs) {
         Show-Usage
@@ -747,7 +752,7 @@ function Normalize-Parameters {
 
     if ($script:RequestedCommand -notin $validCommands) {
         if ($PSBoundParameters.ContainsKey("Version")) {
-            Fail "多余参数: $script:RequestedVersion"
+            Fail "Unexpected extra arg: $script:RequestedVersion"
         }
         $script:RequestedVersion = $script:RequestedCommand
         $script:RequestedCommand = "install"
@@ -766,7 +771,7 @@ function Normalize-Parameters {
             }
 
             if ($script:SourceAction -notin @("install", "update", "rebuild", "switch", "status", "uninstall", "list", "help")) {
-                Fail "source 仅支持 install|update|switch|status|uninstall|list|help；兼容别名 rebuild 会直接提示已移除。"
+                Fail "source supports only install|update|switch|status|uninstall|list|help; rebuild alias was removed and now only shows a hint."
             }
 
             if ($script:SourceAction -eq "help") {
@@ -776,27 +781,37 @@ function Normalize-Parameters {
         }
         "downgrade" {
             if (-not $PSBoundParameters.ContainsKey("Version") -or (Normalize-Version $script:RequestedVersion) -eq "latest") {
-                Fail "downgrade 需要显式指定版本"
+                Fail "downgrade requires an explicit version"
             }
         }
         "uninstall" {
             if ($PSBoundParameters.ContainsKey("Version")) {
-                Fail "uninstall 不接受额外版本参数"
+                Fail "uninstall does not accept a version argument"
             }
         }
         "status" {
             if ($PSBoundParameters.ContainsKey("Version")) {
-                Fail "status 不接受额外版本参数"
+                Fail "status does not accept a version argument"
             }
         }
         "list" {
             if ($PSBoundParameters.ContainsKey("Version")) {
-                Fail "list 不接受额外版本参数"
+                Fail "list does not accept a version argument"
             }
         }
         "relink" {
             if ($PSBoundParameters.ContainsKey("Version")) {
-                Fail "relink 不接受额外版本参数"
+                Fail "relink does not accept a version argument"
+            }
+        }
+        "repair" {
+            if ($PSBoundParameters.ContainsKey("Version")) {
+                Fail "repair does not accept a version argument"
+            }
+        }
+        "manager-install" {
+            if ($PSBoundParameters.ContainsKey("Version")) {
+                Fail "manager-install does not accept a version argument"
             }
         }
     }
@@ -832,11 +847,11 @@ function Detect-Platform {
             Show-SourceUsage
             exit 0
         }
-        Fail "当前脚本仅支持 Windows；macOS、Linux、WSL 请改用 hodexctl.sh"
+        Fail "This script supports Windows only; use hodexctl.sh on macOS/Linux/WSL."
     }
 
     if (-not [Environment]::Is64BitOperatingSystem) {
-        Fail "仅支持 64 位 Windows。"
+        Fail "Only 64-bit Windows is supported."
     }
 
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
@@ -860,7 +875,7 @@ function Detect-Platform {
             )
         }
         default {
-            Fail "不支持的 Windows 架构: $arch"
+            Fail "Unsupported Windows architecture: $arch"
         }
     }
 }
@@ -933,10 +948,13 @@ function Ensure-StateShape {
         $State | Add-Member -NotePropertyName active_runtime_aliases -NotePropertyValue ([ordered]@{}) -Force
     }
 
-    foreach ($field in @("repo", "installed_version", "release_tag", "release_name", "asset_name", "binary_path", "command_dir", "path_update_mode", "path_profile", "node_setup_choice", "installed_at")) {
+    foreach ($field in @("repo", "installed_version", "release_tag", "release_name", "asset_name", "binary_path", "command_dir", "path_update_mode", "path_profile", "path_detected_source", "node_setup_choice", "installed_at")) {
         if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains $field) {
             $State | Add-Member -NotePropertyName $field -NotePropertyValue "" -Force
         }
+    }
+    if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains "path_managed_by_hodexctl") {
+        $State | Add-Member -NotePropertyName path_managed_by_hodexctl -NotePropertyValue $false -Force
     }
     if (@(Get-ObjectPropertyNames -InputObject $State) -notcontains "wrappers_created" -or $null -eq $State.wrappers_created) {
         $State | Add-Member -NotePropertyName wrappers_created -NotePropertyValue @() -Force
@@ -1069,6 +1087,8 @@ function Write-State {
         wrappers_created  = $WrappersCreated
         path_update_mode  = $CurrentPathUpdateMode
         path_profile      = $CurrentPathProfile
+        path_managed_by_hodexctl = $script:PathManagedByHodexctl
+        path_detected_source = $script:PathDetectedSource
         node_setup_choice = $CurrentNodeSetupChoice
         installed_at      = $InstalledAt
         source_profiles   = [ordered]@{}
@@ -1079,12 +1099,22 @@ function Write-State {
         $payload.source_profiles = $state.source_profiles
     }
     if ($state.active_runtime_aliases) {
-        $payload.active_runtime_aliases = $state.active_runtime_aliases
+        if ($state.active_runtime_aliases -is [System.Collections.IDictionary]) {
+            $payload.active_runtime_aliases = $state.active_runtime_aliases
+        } else {
+            $aliases = [ordered]@{}
+            foreach ($property in $state.active_runtime_aliases.PSObject.Properties) {
+                $aliases[$property.Name] = $property.Value
+            }
+            $payload.active_runtime_aliases = $aliases
+        }
     }
-    if (-not $payload.active_runtime_aliases.Contains("hodex")) {
-        $payload.active_runtime_aliases.hodex = "release"
+    if (-not [string]::IsNullOrWhiteSpace($BinaryPath)) {
+        $payload.active_runtime_aliases["hodex"] = "release"
+    } elseif ($payload.active_runtime_aliases.Contains("hodex")) {
+        $payload.active_runtime_aliases.Remove("hodex")
     }
-    if ($payload.active_runtime_aliases.hodex -eq "release" -and $payload.active_runtime_aliases.Contains("hodex_stable")) {
+    if ($payload.active_runtime_aliases.Contains("hodex_stable")) {
         $payload.active_runtime_aliases.Remove("hodex_stable")
     }
 
@@ -1122,7 +1152,7 @@ function Get-ActiveHodexAlias {
     if ($state.active_runtime_aliases -is [System.Collections.IDictionary] -and $state.active_runtime_aliases.Contains("hodex")) {
         return [string]$state.active_runtime_aliases["hodex"]
     }
-    if ($state.active_runtime_aliases.PSObject.Properties.Name -contains "hodex") {
+    if (@(Get-ObjectPropertyNames -InputObject $state.active_runtime_aliases) -contains "hodex") {
         return [string]$state.active_runtime_aliases.hodex
     }
     return ""
@@ -1247,12 +1277,12 @@ function Select-CommandDir {
     }
 
     while ($true) {
-        Write-Host "请选择 hodex / hodexctl 的命令目录:"
+        Write-Host "Select command directory for hodex / hodexctl:"
         Write-Host "  1. $script:DefaultCommandDir"
         Write-Host "  2. $(Join-Path $script:StateRoot 'bin')"
-        Write-Host "  3. 自定义目录"
+        Write-Host "  3. Custom directory"
 
-        $choice = Read-Host "输入选项 [1/2/3]"
+        $choice = Read-Host "Enter choice [1/2/3]"
         switch ($choice) {
             "1" {
                 $script:CurrentCommandDir = $script:DefaultCommandDir
@@ -1263,16 +1293,16 @@ function Select-CommandDir {
                 break
             }
             "3" {
-                $customDir = Read-Host "请输入安装目录"
+                $customDir = Read-Host "Enter install directory"
                 if ([string]::IsNullOrWhiteSpace($customDir)) {
-                    Write-WarnLine "目录不能为空。"
+                    Write-WarnLine "Directory cannot be empty."
                     continue
                 }
                 $script:CurrentCommandDir = Normalize-UserPath $customDir
                 break
             }
             default {
-                Write-WarnLine "请输入 1、2 或 3。"
+                Write-WarnLine "Please enter 1, 2, or 3."
             }
         }
     }
@@ -1283,9 +1313,12 @@ function Select-CommandDir {
 function Update-PathIfNeeded {
     $script:PathUpdateMode = "skipped"
     $script:PathProfile = ""
+    $script:PathManagedByHodexctl = $false
+    $script:PathDetectedSource = ""
 
     if ($NoPathUpdate) {
         $script:PathUpdateMode = "disabled"
+        $script:PathDetectedSource = "disabled"
         return
     }
 
@@ -1303,6 +1336,8 @@ function Update-PathIfNeeded {
         $env:Path = Replace-PathEntry -PathValue $currentPath -OldEntry ([string]$script:State.command_dir) -NewEntry $script:CurrentCommandDir
         $script:PathUpdateMode = "configured"
         $script:PathProfile = "User"
+        $script:PathManagedByHodexctl = $true
+        $script:PathDetectedSource = "managed-user-path"
         return
     }
 
@@ -1314,17 +1349,22 @@ function Update-PathIfNeeded {
             $script:PathUpdateMode = "already"
         }
         $script:PathProfile = "User"
+        $script:PathManagedByHodexctl = $false
+        $script:PathDetectedSource = "preexisting-user-path"
         return
     }
 
     if (Test-PathContains -PathValue $currentPath -Entry $script:CurrentCommandDir) {
-        $script:PathUpdateMode = "already"
-        return
+        $script:PathDetectedSource = "current-process-only"
     }
 
     $shouldUpdate = $true
     if (-not $Yes) {
-        $answer = Read-Host "当前目录 $script:CurrentCommandDir 不在 PATH 中，是否写入用户 PATH？[Y/n]"
+        if ($script:PathDetectedSource -eq "current-process-only") {
+            $answer = Read-Host "Command dir $script:CurrentCommandDir is only in the current session PATH. Write to user PATH? [Y/n]"
+        } else {
+            $answer = Read-Host "Command dir $script:CurrentCommandDir is not in PATH. Write to user PATH? [Y/n]"
+        }
         if ($answer -match "^(n|N|no|NO)$") {
             $shouldUpdate = $false
         }
@@ -1332,6 +1372,9 @@ function Update-PathIfNeeded {
 
     if (-not $shouldUpdate) {
         $script:PathUpdateMode = "user-skipped"
+        if ([string]::IsNullOrWhiteSpace($script:PathDetectedSource)) {
+            $script:PathDetectedSource = "user-skipped"
+        }
         return
     }
 
@@ -1340,6 +1383,8 @@ function Update-PathIfNeeded {
     $env:Path = Add-PathEntry -PathValue $currentPath -Entry $script:CurrentCommandDir
     $script:PathUpdateMode = "added"
     $script:PathProfile = "User"
+    $script:PathManagedByHodexctl = $true
+    $script:PathDetectedSource = "managed-user-path"
 }
 
 function Persist-StateRuntimeMetadata {
@@ -1350,6 +1395,8 @@ function Persist-StateRuntimeMetadata {
     $script:State.command_dir = $script:CurrentCommandDir
     $script:State.path_update_mode = $script:PathUpdateMode
     $script:State.path_profile = $script:PathProfile
+    $script:State.path_managed_by_hodexctl = $script:PathManagedByHodexctl
+    $script:State.path_detected_source = $script:PathDetectedSource
     Save-State -State $script:State
 }
 
@@ -1359,7 +1406,19 @@ function Remove-PathIfNeeded {
         [string]$CurrentPathUpdateMode
     )
 
-    if ($CurrentPathUpdateMode -notin @("added", "configured")) {
+    $managedByHodexctl = $false
+    if ($script:State -and $script:State.path_managed_by_hodexctl) {
+        $managedByHodexctl = $true
+    } elseif (
+        $script:State -and
+        [string]::IsNullOrWhiteSpace([string]$script:State.path_detected_source) -and
+        $CurrentPathUpdateMode -in @("added", "configured")
+    ) {
+        # Compatibility for legacy state.json: infer managed PATH from old fields when path_managed_by_hodexctl is missing.
+        $managedByHodexctl = $true
+    }
+
+    if (-not $managedByHodexctl) {
         return
     }
 
@@ -1438,7 +1497,7 @@ function Resolve-ReleaseDirect {
         }
     }
 
-    Fail "未找到版本 $RequestedVersion 对应的当前平台资产：$($script:AssetCandidates -join ', ')"
+    Fail "No asset for version $RequestedVersion on this platform: $($script:AssetCandidates -join ', ')"
 }
 
 function Resolve-Release {
@@ -1452,14 +1511,14 @@ function Resolve-Release {
         try {
             return Invoke-GitHubApi -Uri "https://api.github.com/repos/$script:RepoName/releases/latest"
         } catch {
-            Fail (Get-GitHubApiFailureMessage -BaseMessage "获取 latest release 失败，请检查仓库名、GitHub API 限流或网络状态")
+            Fail (Get-GitHubApiFailureMessage -BaseMessage "Failed to fetch latest release; check repo name, GitHub API rate limits, or network.")
         }
     }
 
     try {
         $releases = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/$script:RepoName/releases?per_page=100")
     } catch {
-        Fail (Get-GitHubApiFailureMessage -BaseMessage "获取 release 列表失败，请检查仓库名、GitHub API 限流或网络状态")
+        Fail (Get-GitHubApiFailureMessage -BaseMessage "Failed to fetch release list; check repo name, GitHub API rate limits, or network.")
     }
     $normalized = Normalize-Version $RequestedVersion
     $candidates = @($RequestedVersion, $normalized, "v$normalized", "rust-v$normalized") |
@@ -1478,7 +1537,7 @@ function Resolve-Release {
         }
     }
 
-    Fail "未找到版本 $RequestedVersion 对应的 release。"
+    Fail "Release not found for version $RequestedVersion."
 }
 
 function Get-AllReleases {
@@ -1489,7 +1548,7 @@ function Get-AllReleases {
         try {
             $pageReleases = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/$script:RepoName/releases?per_page=100&page=$page")
         } catch {
-            Fail (Get-GitHubApiFailureMessage -BaseMessage "获取 release 列表失败，请检查仓库名、GitHub API 限流或网络状态")
+            Fail (Get-GitHubApiFailureMessage -BaseMessage "Failed to fetch release list; check repo name, GitHub API rate limits, or network.")
         }
         if ($pageReleases.Count -eq 0) {
             break
@@ -1514,16 +1573,16 @@ function Get-AssetInfo {
 
     foreach ($candidate in $script:AssetCandidates) {
         foreach ($asset in @($Release.assets)) {
-            if ([string]$asset.name -eq $candidate) {
-                if ($script:ArchitectureName -eq "aarch64" -and [string]$asset.name -like "*x86_64*") {
-                    Write-WarnLine "当前 release 未提供 Windows ARM64 原生资产，将回退使用 x64 资产，依赖 Windows ARM 的 x64 仿真。"
+                if ([string]$asset.name -eq $candidate) {
+                    if ($script:ArchitectureName -eq "aarch64" -and [string]$asset.name -like "*x86_64*") {
+                    Write-WarnLine "Current release does not provide a native Windows ARM64 asset; falling back to x64 (requires Windows ARM x64 emulation)."
                 }
                 return $asset
             }
         }
     }
 
-    Fail "release 未找到匹配当前平台的资产：$($script:AssetCandidates -join ', ')"
+    Fail "Release has no matching asset for this platform: $($script:AssetCandidates -join ', ')"
 }
 
 function Get-MatchingReleases {
@@ -1569,22 +1628,22 @@ function Verify-DigestIfPresent {
     )
 
     if ([string]::IsNullOrWhiteSpace($Digest)) {
-        Write-WarnLine "release 未提供 digest，跳过 SHA-256 校验。"
+        Write-WarnLine "Release did not provide a digest; skipping SHA-256 verification."
         return
     }
 
     if (-not $Digest.StartsWith("sha256:")) {
-        Write-WarnLine "暂不支持的 digest 格式: $Digest"
+        Write-WarnLine "Unsupported digest format: $Digest"
         return
     }
 
     $expected = $Digest.Substring(7)
     $actual = (Get-FileHash -LiteralPath $DownloadedFile -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected.ToLowerInvariant()) {
-        Fail "SHA-256 校验失败。期望 $expected，实际 $actual"
+        Fail "SHA-256 verification failed. Expected $expected, got $actual"
     }
 
-    Write-Step "SHA-256 校验通过: $actual"
+    Write-Step "SHA-256 verified: $actual"
 }
 
 function Get-ReleaseDetailsText {
@@ -1596,17 +1655,17 @@ function Get-ReleaseDetailsText {
     $asset = $ReleaseInfo.asset
     $body = [string]$release.body
     if ([string]::IsNullOrWhiteSpace($body)) {
-        $body = "<该版本未提供更新日志>"
+        $body = "<No changelog provided for this release>"
     }
 
     return @"
-版本: $([string]$ReleaseInfo.version)
+Version: $([string]$ReleaseInfo.version)
 Release: $([string]$ReleaseInfo.release_name) ($([string]$ReleaseInfo.release_tag))
-发布时间: $([string]$ReleaseInfo.published_at)
-当前平台资产: $([string]$asset.name)
-页面: $([string]$ReleaseInfo.html_url)
+Published at: $([string]$ReleaseInfo.published_at)
+Asset (current platform): $([string]$asset.name)
+Page: $([string]$ReleaseInfo.html_url)
 
-更新日志:
+Changelog:
 $body
 "@
 }
@@ -1617,32 +1676,32 @@ function Get-ReleaseSummaryPrompt {
     $release = $ReleaseInfo.release
     $body = [string]$release.body
     if ([string]::IsNullOrWhiteSpace($body)) {
-        $body = "<该版本未提供更新日志>"
+        $body = "<No changelog provided for this release>"
     }
 
     return @"
-请基于下面这个 Hodex release 的完整 changelog，输出一份简体中文总结。
+Please summarize the full changelog below for this Hodex release.
 
-输出要求：
-1. 只输出最终总结，不要输出思考过程、分析过程、草稿、自我说明或额外前言。
-2. 必须优先按类别做结构化总结，能归类就归类；推荐分类顺序为：
-   - 新增功能
-   - 改进优化
-   - 修复内容
-   - 破坏性变更 / 迁移要求
-   - 其他说明
-3. 没有内容的类别可以省略；不要为了凑分类编造内容。
-4. 每个类别下用简短要点列出关键信息，优先覆盖用户最关心的变化。
-5. 如果存在破坏性变更、兼容性影响、配置变更、需要手动处理的步骤，必须单独明确指出。
-6. 不要遗漏重要信息，不要编造日志中不存在的内容。
-7. 直接开始输出中文总结正文，不要再写“以下是总结”等前言。
+Requirements:
+1. Output only the final summary; do not include analysis, drafts, self-references, or extra preface.
+2. Prefer structured categories when possible, recommended order:
+   - New Features
+   - Improvements
+   - Fixes
+   - Breaking Changes / Migration
+   - Other Notes
+3. Omit empty categories; do not invent content just to fill categories.
+4. Use short bullet points under each category, prioritizing user-relevant changes.
+5. If there are breaking changes, compatibility impact, config changes, or manual steps, call them out explicitly.
+6. Do not omit important information; do not fabricate anything not in the changelog.
+7. Start directly with the summary (no "Summary:" preface).
 
-版本: $([string]$ReleaseInfo.version)
+Version: $([string]$ReleaseInfo.version)
 Release: $([string]$ReleaseInfo.release_name) ($([string]$ReleaseInfo.release_tag))
-发布时间: $([string]$ReleaseInfo.published_at)
-页面: $([string]$ReleaseInfo.html_url)
+Published at: $([string]$ReleaseInfo.published_at)
+Page: $([string]$ReleaseInfo.html_url)
 
-完整 changelog:
+Full changelog:
 $body
 "@
 }
@@ -1682,7 +1741,7 @@ function Test-ReleaseSummaryExecSupport {
 
 function Pause-AfterReleaseSummary {
     if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
-        [void](Read-Host "按回车返回版本详情")
+        [void](Read-Host "Press Enter to return to release details")
     }
 }
 
@@ -1752,7 +1811,7 @@ function Invoke-ReleaseSummary {
     $candidates = @(Get-ReleaseSummaryAgentCandidates)
     if ($candidates.Count -eq 0) {
         Clear-ReleaseSummaryScreen
-        Write-WarnLine "未找到可用的 hodex/codex 命令，无法自动总结 changelog。"
+        Write-WarnLine "No available hodex/codex command found; cannot summarize the changelog."
         Pause-AfterReleaseSummary
         return $false
     }
@@ -1771,11 +1830,11 @@ function Invoke-ReleaseSummary {
 
             Clear-ReleaseSummaryScreen
             if ($usedFallback) {
-                Write-WarnLine "首选命令不可用，已自动改用 $([string]$candidate.Name)。"
+                Write-WarnLine "Preferred command unavailable; switched to $([string]$candidate.Name)."
                 Write-Host ""
             }
 
-            Write-Host "AI 总结生成中，请稍候..."
+            Write-Host "Generating AI summary, please wait..."
             Write-Host ""
 
             try {
@@ -1796,19 +1855,19 @@ function Invoke-ReleaseSummary {
                     return $true
                 }
                 if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
-                    Write-WarnLine "$([string]$candidate.Name) 执行失败: $([string](Get-RetryErrorSummary -ErrorText $stderrText))"
+                    Write-WarnLine "$([string]$candidate.Name) failed: $([string](Get-RetryErrorSummary -ErrorText $stderrText))"
                 }
             } catch {
             }
 
             $usedFallback = $true
             Write-Host ""
-            Write-WarnLine "$([string]$candidate.Name) 总结 changelog 失败，准备尝试下一个可用命令。"
+            Write-WarnLine "$([string]$candidate.Name) failed to summarize the changelog; trying the next command."
             Write-Host ""
         }
 
         Clear-ReleaseSummaryScreen
-        Write-WarnLine "当前找到的 hodex/codex 都无法执行 changelog 总结。"
+        Write-WarnLine "None of the available hodex/codex commands could run the changelog summary."
         Pause-AfterReleaseSummary
         return $false
     } finally {
@@ -1826,21 +1885,21 @@ function Invoke-Download {
     $outputPath = Join-Path $script:DownloadRoot ([string]$asset.name)
 
     if ([Environment]::UserInteractive -and (Test-Path -LiteralPath $outputPath) -and -not $Yes) {
-        $answer = Read-Host "目标文件已存在，是否覆盖？[Y/n]"
+        $answer = Read-Host "Target file already exists. Overwrite? [Y/n]"
         if ($answer -match "^(n|N|no|NO)$") {
-            Write-Info "已取消下载。"
+            Write-Info "Download canceled."
             return
         }
     }
 
-    Write-Step "下载 Hodex 资产"
-    Write-Step "命中 release: $([string]$release.name) ($([string]$release.tag_name))"
-    Write-Step "下载资产: $([string]$asset.name)"
-    Write-Step "保存路径: $outputPath"
-    $downloadResult = Invoke-DownloadWithProgress -Label ("下载 " + [string]$asset.name) -Uri ([string]$asset.browser_download_url) -OutFile $outputPath
+    Write-Step "Download Hodex asset"
+    Write-Step "Selected release: $([string]$release.name) ($([string]$release.tag_name))"
+    Write-Step "Download asset: $([string]$asset.name)"
+    Write-Step "Save path: $outputPath"
+    $downloadResult = Invoke-DownloadWithProgress -Label ("Downloading " + [string]$asset.name) -Uri ([string]$asset.browser_download_url) -OutFile $outputPath
     Verify-DigestIfPresent -DownloadedFile $outputPath -Digest ([string]$asset.digest)
-    Write-Info ("下载完成: {0}，平均速度 {1}/s" -f (Format-ByteSize $downloadResult.bytes), (Format-ByteSize $downloadResult.speed))
-    Write-Info "已下载到: $outputPath"
+    Write-Info ("Download complete: {0}, average speed {1}/s" -f (Format-ByteSize $downloadResult.bytes), (Format-ByteSize $downloadResult.speed))
+    Write-Info "Downloaded to: $outputPath"
 }
 
 function Sync-ControllerCopy {
@@ -1861,7 +1920,7 @@ function Sync-ControllerCopy {
     }
 
     $rawUrl = "$script:ControllerUrlBase/$script:RepoName/main/scripts/hodexctl/hodexctl.ps1"
-    Write-Step "下载 hodexctl 管理脚本"
+    Write-Step "Download hodexctl manager script"
     Invoke-WebRequestWithRetry -Label "controller-download" -Uri $rawUrl -OutFile $TargetPath
 }
 
@@ -1882,7 +1941,7 @@ function Generate-HodexCmdWrapper {
     $content = @"
 @echo off
 if not exist "$BinaryPath" (
-  echo hodex 二进制不存在，请先运行 hodexctl install。 1>&2
+  echo hodex binary is missing; run hodexctl install first. 1>&2
   exit /b 1
 )
 "$BinaryPath" %*
@@ -1900,7 +1959,7 @@ function Generate-HodexPs1Wrapper {
     $content = @"
 `$ErrorActionPreference = "Stop"
 if (-not (Test-Path -LiteralPath "$BinaryPath")) {
-    Write-Error "hodex 二进制不存在，请先运行 hodexctl install。"
+    Write-Error "hodex binary is missing; run hodexctl install first."
     exit 1
 }
 & "$BinaryPath" @args
@@ -1919,7 +1978,7 @@ function Generate-RuntimeCmdWrapper {
     $content = @"
 @echo off
 if not exist "$BinaryPath" (
-  echo $CommandName 对应的二进制不存在，请重新运行 hodexctl 安装或重编译。 1>&2
+  echo $CommandName binary is missing; rerun hodexctl install or rebuild. 1>&2
   exit /b 1
 )
 "$BinaryPath" %*
@@ -1938,7 +1997,7 @@ function Generate-RuntimePs1Wrapper {
     $content = @"
 `$ErrorActionPreference = "Stop"
 if (-not (Test-Path -LiteralPath "$BinaryPath")) {
-    Write-Error "$CommandName 对应的二进制不存在，请重新运行 hodexctl 安装或重编译。"
+    Write-Error "$CommandName binary is missing; rerun hodexctl install or rebuild."
     exit 1
 }
 & "$BinaryPath" @args
@@ -1950,15 +2009,17 @@ if (-not (Test-Path -LiteralPath "$BinaryPath")) {
 function Generate-HodexctlCmdWrapper {
     param(
         [string]$WrapperPath,
-        [string]$ControllerPath
+        [string]$ControllerPath,
+        [string]$StateDir
     )
 
     $runner = Get-ControllerCommand
     $content = @"
 @echo off
 set "HODEX_DISPLAY_NAME=hodexctl"
+set "HODEX_STATE_DIR=$StateDir"
 if not exist "$ControllerPath" (
-  echo hodexctl 管理脚本不存在，请重新安装。 1>&2
+  echo hodexctl controller is missing; reinstall hodexctl. 1>&2
   exit /b 1
 )
 if "%~1"=="" (
@@ -1974,22 +2035,38 @@ $runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" %*
 function Generate-HodexctlPs1Wrapper {
     param(
         [string]$WrapperPath,
-        [string]$ControllerPath
+        [string]$ControllerPath,
+        [string]$StateDir
     )
 
     $runner = Get-ControllerCommand
     $content = @"
 `$ErrorActionPreference = "Stop"
 `$env:HODEX_DISPLAY_NAME = "hodexctl"
+`$env:HODEX_STATE_DIR = "$StateDir"
 if (-not (Test-Path -LiteralPath "$ControllerPath")) {
-    Write-Error "hodexctl 管理脚本不存在，请重新安装。"
+    Write-Error "hodexctl controller is missing; reinstall hodexctl."
     exit 1
 }
-if (`$args.Count -eq 0) {
+`$forwardedArgs = @(`$args)
+`$hasStateDirOverride = `$false
+foreach (`$arg in `$forwardedArgs) {
+    if (`$arg -is [string]) {
+        `$normalizedArg = ([string]`$arg).Trim()
+        if (`$normalizedArg -ieq "-StateDir" -or `$normalizedArg -ieq "--state-dir" -or `$normalizedArg -like "--state-dir=*") {
+            `$hasStateDirOverride = `$true
+            break
+        }
+    }
+}
+if (`$forwardedArgs.Count -eq 0) {
     & "$runner" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" help
     exit `$LASTEXITCODE
 }
-& "$runner" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" @args
+if (-not `$hasStateDirOverride) {
+    `$forwardedArgs = @("-StateDir", "$StateDir") + `$forwardedArgs
+}
+& "$runner" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" @forwardedArgs
 "@
 
     Set-Content -LiteralPath $WrapperPath -Value $content -Encoding UTF8
@@ -2037,11 +2114,11 @@ function Sync-RuntimeWrappersFromState {
     Remove-ManagedRuntimeWrappersFromDir -CommandDir $CommandDir
 
     $releaseInstalled = -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and (Test-Path -LiteralPath ([string]$script:State.binary_path))
-    $keepControllerWrapper = $releaseInstalled -or @((Get-SourceProfiles).Keys).Count -gt 0
+    $keepControllerWrapper = -not [string]::IsNullOrWhiteSpace($ControllerPath) -and $null -ne $script:State
 
     if ($keepControllerWrapper -and -not [string]::IsNullOrWhiteSpace($ControllerPath)) {
-        Generate-HodexctlCmdWrapper -WrapperPath (Join-Path $CommandDir "hodexctl.cmd") -ControllerPath $ControllerPath
-        Generate-HodexctlPs1Wrapper -WrapperPath (Join-Path $CommandDir "hodexctl.ps1") -ControllerPath $ControllerPath
+        Generate-HodexctlCmdWrapper -WrapperPath (Join-Path $CommandDir "hodexctl.cmd") -ControllerPath $ControllerPath -StateDir $script:StateRoot
+        Generate-HodexctlPs1Wrapper -WrapperPath (Join-Path $CommandDir "hodexctl.ps1") -ControllerPath $ControllerPath -StateDir $script:StateRoot
     }
 
     foreach ($profileName in (Get-SourceProfiles).Keys) {
@@ -2080,30 +2157,30 @@ function Remove-OldWrappersIfNeeded {
 
 function Install-NodeNative {
     if (-not (Test-Command "winget")) {
-        Write-WarnLine "未检测到 winget，无法自动使用系统方式安装。请改用手动安装：$script:NodeDownloadUrl"
+        Write-WarnLine "winget not detected; cannot install via system. Use manual install: $script:NodeDownloadUrl"
         return
     }
 
-    Write-Step "使用 winget 安装 Node.js LTS"
+    Write-Step "Install Node.js LTS with winget"
     & winget install --exact --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
 }
 
 function Install-NodeWithNvm {
     if (Test-Command "nvm") {
-        Write-Step "使用 nvm 安装 Node.js LTS"
+        Write-Step "Install Node.js LTS with nvm"
         & nvm install lts
         & nvm use lts
         return
     }
 
     if (-not (Test-Command "winget")) {
-        Write-WarnLine "未检测到 winget，无法自动安装 nvm-windows。请手动安装：$script:NvmWindowsReleaseUrl"
+        Write-WarnLine "winget not detected; cannot auto-install nvm-windows. Install manually: $script:NvmWindowsReleaseUrl"
         return
     }
 
-    Write-Step "通过 winget 安装 nvm-windows"
+    Write-Step "Install nvm-windows with winget"
     & winget install --exact --id CoreyButler.NVMforWindows --accept-package-agreements --accept-source-agreements
-    Write-WarnLine "nvm-windows 已安装。首次安装后通常需要重新打开 PowerShell，再执行: nvm install lts"
+    Write-WarnLine "nvm-windows installed. After first install, reopen PowerShell and run: nvm install lts"
 }
 
 function Prompt-NodeChoice {
@@ -2116,27 +2193,27 @@ function Prompt-NodeChoice {
 
     if ($script:SelectedNodeMode -eq "ask" -and -not [string]::IsNullOrWhiteSpace($PreviousChoice)) {
         $script:NodeSetupChoice = $PreviousChoice
-        Write-Info "当前未安装 Node.js，沿用既有记录: $PreviousChoice"
+        Write-Info "Node.js not installed; reuse previous choice: $PreviousChoice"
         return
     }
 
     if ($script:SelectedNodeMode -eq "ask" -and $Yes) {
         $script:NodeSetupChoice = "skip"
-        Write-WarnLine "检测到未安装 Node.js；非交互模式默认跳过。"
+        Write-WarnLine "Node.js not installed; non-interactive mode defaults to skip."
         return
     }
 
     $effectiveMode = $script:SelectedNodeMode
     if ($effectiveMode -eq "ask") {
-        Write-Host "检测到当前系统未安装 Node.js，可选处理方式:"
-        Write-Host "  1. 系统方式安装"
+        Write-Host "Node.js not detected; choose an option:"
+        Write-Host "  1. Install via system package manager"
         Write-Host "     - Windows: winget"
-        Write-Host "  2. 使用 nvm（Windows 下为 nvm-windows）"
-        Write-Host "  3. 手动下载安装（官网链接）"
-        Write-Host "  4. 跳过"
+        Write-Host "  2. Use nvm (nvm-windows on Windows)"
+        Write-Host "  3. Manual download/install (official site)"
+        Write-Host "  4. Skip"
 
         while ($true) {
-            $answer = Read-Host "请选择 [1/2/3/4]"
+            $answer = Read-Host "Choose [1/2/3/4]"
             switch ($answer) {
                 "1" {
                     $effectiveMode = "native"
@@ -2155,7 +2232,7 @@ function Prompt-NodeChoice {
                     break
                 }
                 default {
-                    Write-WarnLine "请输入 1、2、3 或 4。"
+                    Write-WarnLine "Please enter 1, 2, 3, or 4."
                 }
             }
         }
@@ -2164,10 +2241,10 @@ function Prompt-NodeChoice {
     $script:NodeSetupChoice = $effectiveMode
     switch ($effectiveMode) {
         "skip" {
-            Write-Info "已跳过 Node.js 环境处理。"
+            Write-Info "Skipped Node.js setup."
         }
         "manual" {
-            Write-Info "请手动安装 Node.js：$script:NodeDownloadUrl"
+            Write-Info "Please install Node.js manually: $script:NodeDownloadUrl"
         }
         "native" {
             Install-NodeNative
@@ -2191,10 +2268,10 @@ function Install-BinaryFromAsset {
         $assetName = [string]$Asset.name
         $helperDir = Split-Path -Parent $BinaryPath
         $downloadPath = Join-Path $tempDir $assetName
-        Write-Step "临时下载路径: $downloadPath"
-        $downloadResult = Invoke-DownloadWithProgress -Label ("下载 " + $assetName) -Uri ([string]$Asset.browser_download_url) -OutFile $downloadPath
+        Write-Step "Temp download path: $downloadPath"
+        $downloadResult = Invoke-DownloadWithProgress -Label ("Downloading " + $assetName) -Uri ([string]$Asset.browser_download_url) -OutFile $downloadPath
         Verify-DigestIfPresent -DownloadedFile $downloadPath -Digest ([string]$Asset.digest)
-        Write-Info ("下载完成: {0}，平均速度 {1}/s" -f (Format-ByteSize $downloadResult.bytes), (Format-ByteSize $downloadResult.speed))
+        Write-Info ("Download complete: {0}, average speed {1}/s" -f (Format-ByteSize $downloadResult.bytes), (Format-ByteSize $downloadResult.speed))
 
         $sourceBinary = $downloadPath
         if ($assetName.ToLowerInvariant().EndsWith(".zip")) {
@@ -2204,13 +2281,13 @@ function Install-BinaryFromAsset {
             $sourceBinary = Join-Path $extractDir ([System.IO.Path]::GetFileNameWithoutExtension($assetName))
 
             if (-not (Test-Path -LiteralPath $sourceBinary)) {
-                Fail "未在 release 资产中找到预期的 Windows 可执行文件。"
+                Fail "Expected Windows executable not found in release asset."
             }
 
             foreach ($helperName in @("codex-command-runner.exe", "codex-windows-sandbox-setup.exe")) {
                 $helperSource = Join-Path $extractDir $helperName
                 if (-not (Test-Path -LiteralPath $helperSource)) {
-                    Fail "当前 Windows release 资产缺少必需 helper：$helperName"
+                    Fail "Windows release asset missing required helper: $helperName"
                 }
                 Copy-Item -LiteralPath $helperSource -Destination (Join-Path $helperDir $helperName) -Force
             }
@@ -2220,17 +2297,17 @@ function Install-BinaryFromAsset {
                 $helperDownloadPath = Join-Path $tempDir $helperName
                 $helperUri = [System.Uri]::new($assetUri, $helperName).AbsoluteUri
                 try {
-                    $helperResult = Invoke-DownloadWithProgress -Label ("下载 " + $helperName) -Uri $helperUri -OutFile $helperDownloadPath
-                    Write-Info ("下载完成: {0}，平均速度 {1}/s" -f (Format-ByteSize $helperResult.bytes), (Format-ByteSize $helperResult.speed))
+                    $helperResult = Invoke-DownloadWithProgress -Label ("Downloading " + $helperName) -Uri $helperUri -OutFile $helperDownloadPath
+                    Write-Info ("Download complete: {0}, average speed {1}/s" -f (Format-ByteSize $helperResult.bytes), (Format-ByteSize $helperResult.speed))
                 } catch {
-                    Fail "当前 Windows release 资产缺少必需 helper：$helperName"
+                    Fail "Windows release asset missing required helper: $helperName"
                 }
                 Copy-Item -LiteralPath $helperDownloadPath -Destination (Join-Path $helperDir $helperName) -Force
             }
         }
 
         if (-not (Test-Path -LiteralPath $sourceBinary)) {
-            Fail "未在 release 资产中找到预期的 Windows 可执行文件。"
+            Fail "Expected Windows executable not found in release asset."
         }
 
         Copy-Item -LiteralPath $sourceBinary -Destination $BinaryPath -Force
@@ -2294,7 +2371,7 @@ function Confirm-YesNo {
     }
 
     $suffix = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
-    Write-Host ("当前等待确认输入，直接回车将采用默认值 {0}。" -f $(if ($DefaultYes) { "Y" } else { "N" }))
+    Write-Host ("Awaiting confirmation; press Enter to accept the default {0}." -f $(if ($DefaultYes) { "Y" } else { "N" }))
     $answer = Read-Host "$Prompt $suffix"
     if ([string]::IsNullOrWhiteSpace($answer)) {
         return $DefaultYes
@@ -2306,13 +2383,13 @@ function Validate-SourceProfileName {
     param([string]$ProfileName)
 
     if ([string]::IsNullOrWhiteSpace($ProfileName)) {
-        Fail "源码记录名不能为空。"
+        Fail "Source profile name cannot be empty."
     }
     if ($ProfileName -notmatch '^[A-Za-z0-9._-]+$') {
-        Fail "源码记录名仅支持字母、数字、点、下划线和连字符。"
+        Fail "Source profile name allows only letters, numbers, dots, underscores, and hyphens."
     }
     if ($ProfileName -in @("hodex", "hodexctl", "hodex-stable")) {
-        Fail "源码记录名不能使用保留名称: $ProfileName"
+        Fail "Source profile name cannot use a reserved name: $ProfileName"
     }
 }
 
@@ -2339,7 +2416,7 @@ function Resolve-SourceRepoInput {
         return [pscustomobject]@{ repo_input = "stellarlinkco/codex"; remote_url = "https://github.com/stellarlinkco/codex.git" }
     }
 
-    $answer = Read-Host "请输入源码仓库（owner/repo 或 Git URL，默认 stellarlinkco/codex）"
+    $answer = Read-Host "Enter source repo (owner/repo or Git URL, default stellarlinkco/codex)"
     if ([string]::IsNullOrWhiteSpace($answer)) {
         $answer = "stellarlinkco/codex"
     }
@@ -2411,7 +2488,7 @@ function Show-ChoiceItems {
         return
     }
 
-    Write-Host "  可选项:"
+    Write-Host "  Choices:"
     for ($i = 0; $i -lt $Items.Count; $i++) {
         Write-Host ("    {0}. {1}" -f ($i + 1), $Items[$i])
     }
@@ -2461,23 +2538,23 @@ function Read-ValueWithChoices {
 
             Clear-Host
             Write-Host $Label
-            Write-Host ("  默认值: " + $DefaultValue)
+            Write-Host ("  Default: " + $DefaultValue)
             if (-not [string]::IsNullOrWhiteSpace($Note)) {
-                Write-Host ("  备注: " + $Note)
+                Write-Host ("  Note: " + $Note)
             }
-            Write-Host "  输入当前页编号可直接选择，也可直接输入自定义值"
-            Write-Host "  n/p 翻页，/关键词 过滤，c 清空过滤"
+            Write-Host "  Enter a number on this page to select, or type a custom value"
+            Write-Host "  n/p to page, / to filter, c to clear filter"
             if (-not [string]::IsNullOrWhiteSpace($query)) {
-                Write-Host ("  当前过滤: " + $query)
+                Write-Host ("  Current filter: " + $query)
             }
 
             if ($filteredItems.Count -eq 0) {
-                Write-Host "  当前过滤无匹配候选"
+                Write-Host "  No matches for current filter"
             } else {
                 $pageEnd = [Math]::Min($pageStart + $pageSize, $filteredItems.Count)
                 $pageCount = [Math]::Ceiling($filteredItems.Count / [double]$pageSize)
                 $pageNumber = [Math]::Floor($pageStart / $pageSize) + 1
-                Write-Host ("  候选项: 第 {0}/{1} 页，共 {2} 项" -f $pageNumber, $pageCount, $filteredItems.Count)
+                Write-Host ("  Choices: page {0}/{1}, {2} items" -f $pageNumber, $pageCount, $filteredItems.Count)
                 for ($i = $pageStart; $i -lt $pageEnd; $i++) {
                     Write-Host ("    {0}. {1}" -f ($i - $pageStart + 1), $filteredItems[$i])
                 }
@@ -2524,7 +2601,7 @@ function Read-ValueWithChoices {
                 if ($index -ge 1 -and $index -le $visibleCount) {
                     return [string]$filteredItems[$pageStart + $index - 1]
                 }
-                Write-WarnLine "请输入当前页范围内的编号。"
+                Write-WarnLine "Please enter a number within the current page."
                 continue
             }
 
@@ -2534,12 +2611,12 @@ function Read-ValueWithChoices {
 
     while ($true) {
         Write-Host $Label
-        Write-Host ("  默认值: " + $DefaultValue)
+        Write-Host ("  Default: " + $DefaultValue)
         if (-not [string]::IsNullOrWhiteSpace($Note)) {
-            Write-Host ("  备注: " + $Note)
+            Write-Host ("  Note: " + $Note)
         }
         Show-ChoiceItems -Items $ChoiceItems
-        Write-Host "  输入编号可直接选择，也可直接输入自定义值"
+        Write-Host "  Enter a number to select, or type a custom value"
 
         $answer = Read-Host ">"
         if ([string]::IsNullOrWhiteSpace($answer)) {
@@ -2551,7 +2628,7 @@ function Read-ValueWithChoices {
             if ($index -ge 1 -and $index -le $ChoiceItems.Count) {
                 return [string]$ChoiceItems[$index - 1]
             }
-            Write-WarnLine "编号超出范围，请重新输入。"
+            Write-WarnLine "Number out of range, please retry."
             continue
         }
 
@@ -2703,7 +2780,7 @@ function Read-SourceRefWithChoices {
         $DefaultRef = $script:DefaultSourceRef
     }
 
-    return Read-ValueWithChoices -Label "目标 ref（branch / tag / commit）" -DefaultValue $DefaultRef -ChoiceItems (Get-SourceRefCandidates -RepoInput $RepoInput -ProfileName $ProfileName -DefaultRef $DefaultRef -CheckoutDir $CheckoutDir) -Note "候选项默认只展示 branch；标签或 commit 可直接输入"
+    return Read-ValueWithChoices -Label "Target ref (branch / tag / commit)" -DefaultValue $DefaultRef -ChoiceItems (Get-SourceRefCandidates -RepoInput $RepoInput -ProfileName $ProfileName -DefaultRef $DefaultRef -CheckoutDir $CheckoutDir) -Note "Candidates default to branches; tags or commits can be typed directly"
 }
 
 function Run-SourceInstallWizard {
@@ -2723,42 +2800,42 @@ function Run-SourceInstallWizard {
 
     while ($true) {
         Clear-Host
-        Write-Host "源码下载向导"
+        Write-Host "Source download wizard"
         Write-Host ""
-        Write-Host "将按顺序确认仓库、源码记录名、ref 和 checkout 目录。"
-        Write-Host "直接回车表示接受默认值；源码模式仅下载/同步源码，不再编译。"
+        Write-Host "We will confirm repo, source profile, ref, and checkout dir in order."
+        Write-Host "Press Enter to accept defaults; source mode only downloads/syncs and does not build."
         Write-Host ""
 
-        $repoInput = Read-ValueWithChoices -Label "源码仓库（owner/repo 或 Git URL）" -DefaultValue "stellarlinkco/codex" -ChoiceItems (Get-SourceRepoCandidates)
+        $repoInput = Read-ValueWithChoices -Label "Source repo (owner/repo or Git URL)" -DefaultValue "stellarlinkco/codex" -ChoiceItems (Get-SourceRepoCandidates)
 
         while ($true) {
-            $profileName = Read-ValueWithChoices -Label "源码记录名" -DefaultValue "codex-source" -ChoiceItems (Get-SourceProfileCandidates -RepoInput $repoInput) -Note "这是源码记录名/工作区标识，不是命令名"
+            $profileName = Read-ValueWithChoices -Label "Source profile name" -DefaultValue "codex-source" -ChoiceItems (Get-SourceProfileCandidates -RepoInput $repoInput) -Note "This is a source profile/workspace id, not a command name"
             try {
                 Validate-SourceProfileName -ProfileName $profileName
                 break
             } catch {
-                Write-WarnLine "源码记录名不能使用保留名称。"
+                Write-WarnLine "Source profile name cannot use a reserved name."
             }
         }
 
         $remoteUrl = Get-SourceRemoteUrlFromInput -RepoInput $repoInput
         $defaultCheckoutDir = Get-DefaultSourceCheckoutDir -RemoteInput $remoteUrl
-        $refName = Read-ValueWithChoices -Label "源码 ref（branch / tag / commit）" -DefaultValue "main" -ChoiceItems (Get-SourceRefCandidates -RepoInput $repoInput -ProfileName $profileName -DefaultRef "main" -CheckoutDir $defaultCheckoutDir) -Note "候选项默认只展示 branch；标签或 commit 可直接输入"
+        $refName = Read-ValueWithChoices -Label "Source ref (branch / tag / commit)" -DefaultValue "main" -ChoiceItems (Get-SourceRefCandidates -RepoInput $repoInput -ProfileName $profileName -DefaultRef "main" -CheckoutDir $defaultCheckoutDir) -Note "Candidates default to branches; tags or commits can be typed directly"
         Write-Host ""
-        Write-Host "步骤 4/4 checkout"
-        Write-Host "默认会把源码 checkout 放到受管源码目录，便于后续 update / switch 复用。"
-        $checkoutDir = Normalize-UserPath (Read-ValueWithChoices -Label "源码 checkout 目录" -DefaultValue $defaultCheckoutDir -ChoiceItems (Get-SourceCheckoutCandidates -RemoteUrl $remoteUrl -DefaultCheckoutDir $defaultCheckoutDir))
+        Write-Host "Step 4/4: checkout"
+        Write-Host "By default, checkout is placed under the managed source directory for update/switch reuse."
+        $checkoutDir = Normalize-UserPath (Read-ValueWithChoices -Label "Source checkout dir" -DefaultValue $defaultCheckoutDir -ChoiceItems (Get-SourceCheckoutCandidates -RemoteUrl $remoteUrl -DefaultCheckoutDir $defaultCheckoutDir))
 
         Write-Host ""
-        Write-Host "向导摘要"
-        Write-Host ("  仓库: " + $repoInput)
-        Write-Host ("  源码记录名: " + $profileName)
+        Write-Host "Wizard summary"
+        Write-Host ("  Repo: " + $repoInput)
+        Write-Host ("  Source profile: " + $profileName)
         Write-Host ("  ref: " + $refName)
         Write-Host ("  checkout: " + $checkoutDir)
 
         Write-Host ""
-        Write-Host "即将进入确认步骤。"
-        if (Confirm-YesNo -Prompt "确认使用以上配置继续下载？" -DefaultYes $true) {
+        Write-Host "Entering confirmation step."
+        if (Confirm-YesNo -Prompt "Continue with the above configuration?" -DefaultYes $true) {
             if ($repoInput -match '://|^git@') {
                 $script:SourceGitUrl = $repoInput
             } else {
@@ -2771,8 +2848,8 @@ function Run-SourceInstallWizard {
             return $true
         }
 
-        if (-not (Confirm-YesNo -Prompt "是否重新填写源码下载向导？" -DefaultYes $true)) {
-            Write-Info "已取消。"
+        if (-not (Confirm-YesNo -Prompt "Restart the source download wizard?" -DefaultYes $true)) {
+            Write-Info "Canceled."
             return $false
         }
     }
@@ -2797,7 +2874,7 @@ function Resolve-SourceCheckoutDir {
         return $DefaultDir
     }
 
-    $answer = Read-Host "源码 checkout 目录 [$DefaultDir]"
+    $answer = Read-Host "Source checkout dir [$DefaultDir]"
     if ([string]::IsNullOrWhiteSpace($answer)) {
         return $DefaultDir
     }
@@ -2829,10 +2906,10 @@ function Resolve-SourceProfileName {
             }
             while ($true) {
                 Clear-Host
-                Write-Host "选择源码条目"
+                Write-Host "Select source profile"
                 Write-Host ""
-                Write-Host ("共 {0} 个源码条目；默认优先定位 {1}，否则落到第一项。" -f $profiles.Count, $script:DefaultSourceProfileName)
-                Write-Host "上下键移动  Enter 确认  q 取消"
+                Write-Host ("Total {0} profiles; default focus is {1}, otherwise the first item." -f $profiles.Count, $script:DefaultSourceProfileName)
+                Write-Host "Arrow keys move  Enter confirm  q cancel"
                 Write-Host ""
                 for ($i = 0; $i -lt $profiles.Count; $i++) {
                     $profile = Get-SourceProfile -ProfileName ([string]$profiles[$i])
@@ -2844,7 +2921,7 @@ function Resolve-SourceProfileName {
                 }
                 $selectedProfile = Get-SourceProfile -ProfileName ([string]$profiles[$cursor])
                 Write-Host ""
-                Write-Host ("选中摘要: {0} | ref={1} | checkout={2}" -f [string]$profiles[$cursor], [string]$selectedProfile.current_ref, [string]$selectedProfile.checkout_dir)
+                Write-Host ("Selection: {0} | ref={1} | checkout={2}" -f [string]$profiles[$cursor], [string]$selectedProfile.current_ref, [string]$selectedProfile.checkout_dir)
                 $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
                 switch ($key.VirtualKeyCode) {
                     13 { return [string]$profiles[$cursor] }
@@ -2858,24 +2935,24 @@ function Resolve-SourceProfileName {
                     }
                     default {
                         if ($key.Character -eq 'q' -or $key.Character -eq 'Q') {
-                            Fail "已取消选择源码条目。"
+                            Fail "Source profile selection canceled."
                         }
                     }
                 }
             }
         }
         while ($true) {
-            Write-Host "请选择源码条目:"
+            Write-Host "Select a source profile:"
             for ($i = 0; $i -lt $profiles.Count; $i++) {
                 $profile = Get-SourceProfile -ProfileName ([string]$profiles[$i])
                 Write-Host ("  {0}. {1} | {2} | {3}" -f ($i + 1), [string]$profiles[$i], [string]$profile.current_ref, [string]$profile.repo_input)
             }
-            $choice = Read-Host ("输入编号选择源码条目 [1-" + $profiles.Count + "]")
+            $choice = Read-Host ("Enter number to select profile [1-" + $profiles.Count + "]")
             $index = 0
             if ([int]::TryParse($choice, [ref]$index) -and $index -ge 1 -and $index -le $profiles.Count) {
                 return [string]$profiles[$index - 1]
             }
-            Write-WarnLine "请输入有效编号。"
+            Write-WarnLine "Please enter a valid number."
         }
     }
 
@@ -2884,7 +2961,7 @@ function Resolve-SourceProfileName {
     }
     $defaultSourceProfile = if ([string]::IsNullOrWhiteSpace($script:SourceProfile)) { $script:DefaultSourceProfileName } else { $script:SourceProfile }
     if (-not $Yes) {
-        $answer = Read-Host "源码记录名 [$defaultSourceProfile]"
+        $answer = Read-Host "Source profile name [$defaultSourceProfile]"
         if (-not [string]::IsNullOrWhiteSpace($answer)) {
             return $answer
         }
@@ -2910,36 +2987,36 @@ function Confirm-SourcePlan {
     }
 
     Write-Host ""
-    Write-Host ("即将执行: " + $ActionLabel)
-    Write-Host ("  源码记录名: " + $ProfileName)
-    Write-Host ("  仓库: " + $(if ([string]::IsNullOrWhiteSpace($RepoInput)) { "<unknown>" } else { $RepoInput }))
+    Write-Host ("About to run: " + $ActionLabel)
+    Write-Host ("  Source profile: " + $ProfileName)
+    Write-Host ("  Repo: " + $(if ([string]::IsNullOrWhiteSpace($RepoInput)) { "<unknown>" } else { $RepoInput }))
     Write-Host ("  checkout: " + $(if ([string]::IsNullOrWhiteSpace($CheckoutDir)) { "<unknown>" } else { $CheckoutDir }))
     Write-Host ("  ref: " + $(if ([string]::IsNullOrWhiteSpace($RefName)) { "<unknown>" } else { $RefName }))
     if (-not [string]::IsNullOrWhiteSpace($CurrentRef) -and $CurrentRef -ne $RefName) {
-        Write-Host ("  当前 -> 目标 ref: " + $CurrentRef + " -> " + $RefName)
+        Write-Host ("  Current -> target ref: " + $CurrentRef + " -> " + $RefName)
     }
     if (-not [string]::IsNullOrWhiteSpace($CurrentCheckout) -and $CurrentCheckout -ne $CheckoutDir) {
-        Write-Host ("  当前 -> 目标 checkout: " + $CurrentCheckout + " -> " + $CheckoutDir)
+        Write-Host ("  Current -> target checkout: " + $CurrentCheckout + " -> " + $CheckoutDir)
     }
     if (-not [string]::IsNullOrWhiteSpace($CheckoutMode)) {
-        Write-Host ("  checkout 策略: " + $CheckoutMode)
+        Write-Host ("  Checkout strategy: " + $CheckoutMode)
     }
     if (-not [string]::IsNullOrWhiteSpace($Hint)) {
-        Write-Host ("  说明: " + $Hint)
+        Write-Host ("  Note: " + $Hint)
     }
-    return (Confirm-YesNo -Prompt "确认继续？" -DefaultYes $true)
+    return (Confirm-YesNo -Prompt "Continue?" -DefaultYes $true)
 }
 
 function Get-SourceErrorCategory {
     param([string]$Message)
 
     switch -Regex ($Message) {
-        '工具链|缺失|rustup|cargo|rustc|xcode-clt|msvc-build-tools' { return "工具链问题" }
-        'Git 仓库|远端|clone|git|checkout|未提交修改' { return "Git / 源码目录问题" }
-        'ref|branch|tag|commit' { return "目标 ref 问题" }
-        '构建|编译|产物|cargo build' { return "构建问题" }
-        '名称|保留名称|-dev|参数' { return "输入参数问题" }
-        default { return "未分类问题" }
+        'toolchain|missing|rustup|cargo|rustc|xcode-clt|msvc-build-tools' { return "Toolchain issue" }
+        'git repo|remote|clone|git|checkout|uncommitted' { return "Git / source checkout issue" }
+        'ref|branch|tag|commit' { return "Target ref issue" }
+        'build|compile|artifact|cargo build' { return "Build issue" }
+        'name|reserved|-dev|argument|parameter' { return "Input issue" }
+        default { return "Unclassified issue" }
     }
 }
 
@@ -2954,11 +3031,11 @@ function Show-SourceResultSummary {
     )
 
     Write-Host ""
-    Write-Host "结果摘要"
-        Write-Host ("  动作: " + $ActionLabel)
-        Write-Host ("  源码记录名: " + $ProfileName)
+    Write-Host "Result summary"
+        Write-Host ("  Action: " + $ActionLabel)
+        Write-Host ("  Source profile: " + $ProfileName)
     if (-not [string]::IsNullOrWhiteSpace($RefName)) {
-        Write-Host ("  当前 ref: " + $RefName)
+        Write-Host ("  Current ref: " + $RefName)
     }
     if (-not [string]::IsNullOrWhiteSpace($CheckoutDir)) {
         Write-Host ("  checkout: " + $CheckoutDir)
@@ -2977,38 +3054,38 @@ function Show-SourceMenuActionPreview {
             $previewRepo = if ([string]::IsNullOrWhiteSpace($script:SourceGitUrl)) { $script:RepoName } else { $script:SourceGitUrl }
             $previewRemote = Get-SourceRemoteUrlFromInput -RepoInput $previewRepo
             $previewCheckout = if ([string]::IsNullOrWhiteSpace($script:SourceCheckoutDir)) { Get-DefaultSourceCheckoutDir -RemoteInput $previewRemote } else { Normalize-UserPath $script:SourceCheckoutDir }
-            Write-Host ("  默认仓库: " + $previewRepo)
-            Write-Host ("  默认源码记录名: " + $previewName)
-            Write-Host ("  默认 ref: " + $script:SourceRef)
-            Write-Host ("  默认 checkout: " + $previewCheckout)
-            Write-Host "  执行内容: clone/fetch、工具链检查、登记源码记录"
+            Write-Host ("  Default repo: " + $previewRepo)
+            Write-Host ("  Default source profile: " + $previewName)
+            Write-Host ("  Default ref: " + $script:SourceRef)
+            Write-Host ("  Default checkout: " + $previewCheckout)
+            Write-Host "  Action: clone/fetch, toolchain check, register source profile"
         }
         "2" {
-            Write-Host "  默认对象: 单个源码条目自动选中；多个源码条目进入选择器"
-            Write-Host "  执行内容: fetch 最新代码、切回当前 ref、同步 checkout"
-            Write-Host "  保留规则: 只管理源码目录和工具链，不影响 hodex release"
+            Write-Host "  Default target: auto-select single profile; multiple profiles open selector"
+            Write-Host "  Action: fetch latest code, switch back to current ref, sync checkout"
+            Write-Host "  Scope: manage source dir and toolchain only; does not affect hodex release"
         }
         "3" {
-            Write-Host "  默认对象: 单个源码条目自动选中；多个源码条目进入选择器"
-            Write-Host "  执行内容: 先确认新的 branch/tag/commit，再切换并同步源码"
-            Write-Host "  安全限制: checkout 存在未提交修改时会拒绝切换"
+            Write-Host "  Default target: auto-select single profile; multiple profiles open selector"
+            Write-Host "  Action: confirm new branch/tag/commit, then switch and sync source"
+            Write-Host "  Safety: refuse switch if checkout has uncommitted changes"
         }
         "4" {
-            Write-Host "  当前版本已移除源码编译能力。"
-            Write-Host "  如需最新源码，请使用“更新源码”或“切换 ref”。"
+            Write-Host "  Source build has been removed in the current version."
+            Write-Host "  Use 'Update source' or 'Switch ref' to get the latest source."
         }
         "5" {
-            Write-Host "  默认对象: 单个源码条目自动展示详情；多个源码条目展示摘要列表"
-            Write-Host "  展示内容: 仓库、ref、checkout、工作区、最近同步时间"
+            Write-Host "  Default target: show details for a single profile; multiple profiles show a summary list"
+            Write-Host "  Includes: repo, ref, checkout, workspace, last sync time"
         }
         "6" {
-            Write-Host "  默认对象: 单个源码条目自动选中；多个源码条目进入选择器"
-            Write-Host "  删除内容: 源码条目记录，可选删除 checkout"
-            Write-Host "  最后清理: 如果这是最后一个 runtime，会连同 hodexctl 和受管 PATH 一起清理"
+            Write-Host "  Default target: auto-select single profile; multiple profiles open selector"
+            Write-Host "  Removes: source profile record; optional checkout deletion"
+            Write-Host "  Final cleanup: if this is the last runtime, remove hodexctl and managed PATH entries"
         }
         "7" {
-            Write-Host ("  展示内容: 所有源码条目的仓库、ref、checkout 摘要")
-            Write-Host ("  当前已记录: " + $profileCount + " 个")
+            Write-Host ("  Includes: repo/ref/checkout summary for all source profiles")
+            Write-Host ("  Currently recorded: " + $profileCount)
         }
     }
 }
@@ -3018,7 +3095,7 @@ function Ensure-GitWorktreeClean {
 
     $status = (& git -C $CheckoutDir status --porcelain --untracked-files=no 2>$null | Out-String).Trim()
     if (-not [string]::IsNullOrWhiteSpace($status)) {
-        Fail "源码目录存在未提交修改，请先提交或清理后再切换/更新: $CheckoutDir"
+        Fail "Source checkout has uncommitted changes. Commit or clean before switching/updating: $CheckoutDir"
     }
 }
 
@@ -3045,7 +3122,7 @@ function Get-SourceRefKind {
     if ($LASTEXITCODE -eq 0) {
         return "commit"
     }
-    Fail "未找到可用的 ref: $RefName"
+    Fail "No matching ref found: $RefName"
 }
 
 function Write-GitFetchSummary {
@@ -3170,7 +3247,7 @@ function Get-SourceWorkspaceRoot {
     if (Test-Path -LiteralPath $rootCargo) {
         return $CheckoutDir
     }
-    Fail "未识别到可支持的源码构建入口（缺少 codex-rs/Cargo.toml 或 Cargo.toml）。"
+    Fail "No supported source build entry found (missing codex-rs/Cargo.toml or Cargo.toml)."
 }
 
 function Get-SourceBuildStrategy {
@@ -3195,7 +3272,7 @@ function Get-SourceBuildStrategy {
             }
         }
     }
-    Fail "当前源码仓库未检测到可构建的 codex CLI 入口。"
+    Fail "No buildable codex CLI entry found in the source repo."
 }
 
 function Get-CargoBuildTotalUnits {
@@ -3225,7 +3302,7 @@ function Get-CargoBuildTotalUnits {
         }
     }
     if ($null -eq $rootPackage) {
-        Fail "未找到源码构建目标对应的 Cargo package。"
+        Fail "No Cargo package found for the source build target."
     }
 
     $nodeMap = @{}
@@ -3319,7 +3396,7 @@ function Invoke-CargoBuildWithProgress {
                 & cargo build --manifest-path $manifestPath --bin $BuildTarget --release
             }
             default {
-                Fail "未知的源码构建模式: $BuildMode"
+                Fail "Unknown source build mode: $BuildMode"
             }
         }
         if ($LASTEXITCODE -ne 0) {
@@ -3331,7 +3408,7 @@ function Invoke-CargoBuildWithProgress {
     $metadataJson = Invoke-NativeCommandWithRetry -Label "cargo-metadata" -FilePath "cargo" -ArgumentList @("metadata", "--format-version", "1", "--manifest-path", $manifestPath) -CaptureOutput
     $metadata = $metadataJson | ConvertFrom-Json
     $totalUnits = Get-CargoBuildTotalUnits -Metadata $metadata -BuildMode $BuildMode -BuildTarget $BuildTarget
-    Write-Host ("编译进度预估: {0} 个编译单元" -f $totalUnits)
+    Write-Host ("Estimated compile progress: {0} compilation units" -f $totalUnits)
 
     $cargoArgs = New-Object System.Collections.Generic.List[string]
     [void]$cargoArgs.Add("build")
@@ -3355,7 +3432,7 @@ function Invoke-CargoBuildWithProgress {
     $seen = New-Object 'System.Collections.Generic.HashSet[string]'
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-    Write-Progress -Activity "编译源码版 Hodex" -Status "准备构建图" -PercentComplete 0
+    Write-Progress -Activity "Build Hodex from source" -Status "Preparing build graph" -PercentComplete 0
 
     & cargo @cargoArgs 2>&1 | ForEach-Object {
         $line = [string]$_
@@ -3384,7 +3461,7 @@ function Invoke-CargoBuildWithProgress {
                                 $elapsed = [Math]::Max($stopwatch.Elapsed.TotalSeconds, 0.1)
                                 $remaining = if ($completed -gt 0) { ($elapsed / $completed) * [Math]::Max($totalUnits - $completed, 0) } else { -1 }
                                 $status = "{0}/{1} | ETA {2} | fresh={3} | {4}" -f $completed, $totalUnits, (Format-DurationText -Seconds $remaining), $freshCount, ([string]$message.target.name)
-                                Write-Progress -Activity "编译源码版 Hodex" -Status $status -PercentComplete $percent -SecondsRemaining ([int][Math]::Max($remaining, 0))
+                                Write-Progress -Activity "Build Hodex from source" -Status $status -PercentComplete $percent -SecondsRemaining ([int][Math]::Max($remaining, 0))
                             }
                         }
                         return
@@ -3400,7 +3477,7 @@ function Invoke-CargoBuildWithProgress {
                     }
                     "build-finished" {
                         if ($message.success) {
-                            Write-Progress -Activity "编译源码版 Hodex" -Status "构建完成" -PercentComplete 100 -Completed
+                            Write-Progress -Activity "Build Hodex from source" -Status "Build finished" -PercentComplete 100 -Completed
                         }
                         return
                     }
@@ -3412,11 +3489,11 @@ function Invoke-CargoBuildWithProgress {
     }
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Progress -Activity "编译源码版 Hodex" -Completed
+        Write-Progress -Activity "Build Hodex from source" -Completed
         throw "EXITCODE=$LASTEXITCODE"
     }
 
-    Write-Progress -Activity "编译源码版 Hodex" -Status "构建完成" -PercentComplete 100 -Completed
+    Write-Progress -Activity "Build Hodex from source" -Status "Build finished" -PercentComplete 100 -Completed
 }
 
 function Build-SourceBinary {
@@ -3426,14 +3503,14 @@ function Build-SourceBinary {
     )
 
     $strategy = Get-SourceBuildStrategy -WorkspaceRoot $WorkspaceRoot
-    Write-Step "编译源码版 Hodex"
+    Write-Step "Build Hodex from source"
     Invoke-WithRetry -Label "cargo-build" -ScriptBlock {
         Invoke-CargoBuildWithProgress -WorkspaceRoot $WorkspaceRoot -BuildMode ([string]$strategy.mode) -BuildTarget ([string]$strategy.target)
     }
 
     $sourceBinary = Join-Path $WorkspaceRoot "target\release\codex.exe"
     if (-not (Test-Path -LiteralPath $sourceBinary)) {
-        Fail "源码构建完成，但未找到预期产物: $sourceBinary"
+        Fail "Source build finished but expected artifact not found: $sourceBinary"
     }
 
     Ensure-DirWritable (Split-Path -Parent $BinaryOutputPath)
@@ -3471,20 +3548,20 @@ function Detect-SourceToolchain {
 function Show-SourceToolchainReport {
     param([object]$Report)
 
-    Write-Host "源码模式工具链检查:"
+    Write-Host "Source toolchain check:"
     foreach ($item in @("git", "rustup", "cargo", "rustc")) {
-        $status = if (@($Report.required_missing) -contains $item) { "缺失" } else { "已安装" }
+        $status = if (@($Report.required_missing) -contains $item) { "missing" } else { "installed" }
         Write-Host "  - ${item}: $status"
     }
     foreach ($item in @("msvc-build-tools", "just", "node", "npm")) {
-        $status = if (@($Report.optional_missing) -contains $item) { "缺失" } else { "已安装" }
+        $status = if (@($Report.optional_missing) -contains $item) { "missing" } else { "installed" }
         Write-Host "  - ${item}: $status"
     }
 }
 
 function Install-RustupWithWinget {
     if (-not (Test-Command "winget")) {
-        Fail "未检测到 winget，无法自动安装 rustup。"
+        Fail "winget not detected; cannot auto-install rustup."
     }
     & winget install --exact --id Rustlang.Rustup --accept-package-agreements --accept-source-agreements
     Ensure-LocalToolPaths
@@ -3505,7 +3582,7 @@ function Auto-InstallSourceToolchain {
                 & winget install --exact --id Microsoft.VisualStudio.2022.BuildTools --accept-package-agreements --accept-source-agreements --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools"
             }
             "just" {
-                Write-Step "安装 just"
+                Write-Step "Install just"
                 Invoke-NativeCommandWithRetry -Label "cargo-install" -FilePath "cargo" -ArgumentList @("install", "just")
                 $cargoBin = Join-Path $HOME ".cargo\bin"
                 if (Test-Path -LiteralPath $cargoBin -and -not (Test-PathContains -PathValue $env:Path -Entry $cargoBin)) {
@@ -3529,7 +3606,7 @@ function Ensure-SourceToolchainReady {
         return $report
     }
 
-    if (Confirm-YesNo -Prompt "是否自动安装上述缺失工具？" -DefaultYes $true) {
+    if (Confirm-YesNo -Prompt "Auto-install missing tools above?" -DefaultYes $true) {
         Auto-InstallSourceToolchain -Report ([pscustomobject]@{
             required_missing = @($report.required_missing)
             optional_missing = @()
@@ -3539,7 +3616,7 @@ function Ensure-SourceToolchainReady {
     }
 
     if (@($report.required_missing).Count -gt 0) {
-        Fail "源码构建所需工具链仍不完整，请先补齐缺失项后重试。"
+        Fail "Source build toolchain is still incomplete; install missing items and retry."
     }
     return $report
 }
@@ -3563,7 +3640,7 @@ function Prepare-SourceCheckout {
 
     if (-not (Test-Path -LiteralPath $CheckoutDir)) {
         Ensure-DirWritable (Split-Path -Parent $CheckoutDir)
-        Write-Step "克隆源码仓库"
+        Write-Step "Clone source repo"
         Invoke-NativeCommandWithRetry -Label "git-clone" -FilePath "git" -ArgumentList @("clone", $RemoteUrl, $CheckoutDir)
         return
     }
@@ -3571,16 +3648,16 @@ function Prepare-SourceCheckout {
     if (Test-Path -LiteralPath (Join-Path $CheckoutDir ".git")) {
         $currentRemote = (& git -C $CheckoutDir remote get-url origin 2>$null | Out-String).Trim()
         if (-not [string]::IsNullOrWhiteSpace($currentRemote) -and $currentRemote -ne $RemoteUrl) {
-            if (Confirm-YesNo -Prompt "源码目录远端与当前请求不同，是否将 origin 改为 $RemoteUrl ?" -DefaultYes $false) {
+            if (Confirm-YesNo -Prompt "Source checkout remote differs from requested; update origin to $RemoteUrl ?" -DefaultYes $false) {
                 & git -C $CheckoutDir remote set-url origin $RemoteUrl
             } else {
-                Fail "源码目录远端与当前请求不一致: $CheckoutDir"
+                Fail "Source checkout remote does not match requested: $CheckoutDir"
             }
         }
         return
     }
 
-    Fail "源码 checkout 目录已存在且不是 Git 仓库: $CheckoutDir"
+    Fail "Source checkout path exists but is not a Git repo: $CheckoutDir"
 }
 
 function Get-SourceActivationMode {
@@ -3596,7 +3673,7 @@ function Invoke-SourceBuild {
     param(
         [string]$ProfileName,
         [string]$ActivationMode = "preserve",
-        [string]$ActionLabel = "同步源码条目",
+        [string]$ActionLabel = "Sync source profile",
         [switch]$SkipPlanConfirm
     )
 
@@ -3609,16 +3686,16 @@ function Invoke-SourceBuild {
     $checkoutDir = Resolve-SourceCheckoutDir -DefaultDir $defaultCheckoutDir -ProfileName $ProfileName
     $refName = $script:SourceRef
     $checkoutMode = if (-not (Test-Path -LiteralPath $checkoutDir)) {
-        "首次 clone 到新目录"
+        "Clone into new directory"
     } elseif (-not [string]::IsNullOrWhiteSpace($script:SourceCheckoutDir) -and $checkoutDir -ne $defaultCheckoutDir) {
-        "使用显式指定的独立 checkout"
+        "Use explicitly specified checkout"
     } else {
-        "复用现有 checkout"
+        "Reuse existing checkout"
     }
 
     if (-not $SkipPlanConfirm) {
         if (-not (Confirm-SourcePlan -ActionLabel $ActionLabel -ProfileName $ProfileName -RepoInput ([string]$repoInfo.repo_input) -CheckoutDir $checkoutDir -RefName $refName -CheckoutMode $checkoutMode -CurrentRef $(if ($existing) { [string]$existing.current_ref } else { "" }) -CurrentCheckout $(if ($existing) { [string]$existing.checkout_dir } else { "" }))) {
-            Write-Info "已取消。"
+            Write-Info "Canceled."
             return
         }
     }
@@ -3672,7 +3749,7 @@ function Invoke-SourceBuild {
     Update-PathIfNeeded
     Persist-StateRuntimeMetadata
 
-    Write-Step "源码同步完成: $checkoutDir"
+    Write-Step "Source sync completed: $checkoutDir"
     Show-SourceResultSummary -ActionLabel $ActionLabel -ProfileName $ProfileName -RefName $refName -CheckoutDir $checkoutDir
 }
 
@@ -3681,28 +3758,28 @@ function Invoke-SourceInstall {
         return
     }
     $profileName = Resolve-SourceProfileName -RequireExisting $false
-    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "下载源码并准备工具链" -SkipPlanConfirm
+    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "Download source and prepare toolchain" -SkipPlanConfirm
 }
 
 function Invoke-SourceUpdate {
     if ($null -eq $script:State -or @((Get-SourceProfiles).Keys).Count -eq 0) {
-        Fail "未检测到源码记录，请先执行 hodexctl source install。"
+        Fail "No source profiles found. Run 'hodexctl source install' first."
     }
     $profileName = Resolve-SourceProfileName -RequireExisting $true
     $existing = Get-SourceProfile -ProfileName $profileName
     if (-not $PSBoundParameters.ContainsKey("Ref")) {
         $script:SourceRef = [string]$existing.current_ref
     }
-    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "更新源码"
+    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "Update source"
 }
 
 function Invoke-SourceRebuild {
-    Fail "source rebuild 已移除；源码模式现在只保留源码下载/同步和开发工具链准备功能。"
+    Fail "source rebuild has been removed; source mode now only keeps download/sync and toolchain prep."
 }
 
 function Invoke-SourceSwitch {
     if ($null -eq $script:State -or @((Get-SourceProfiles).Keys).Count -eq 0) {
-        Fail "未检测到源码记录，请先执行 hodexctl source install。"
+        Fail "No source profiles found. Run 'hodexctl source install' first."
     }
     $profileName = Resolve-SourceProfileName -RequireExisting $true
     $existing = Get-SourceProfile -ProfileName $profileName
@@ -3711,17 +3788,17 @@ function Invoke-SourceSwitch {
             $script:SourceRef = Read-SourceRefWithChoices -RepoInput ([string]$existing.repo_input) -ProfileName $profileName -DefaultRef ([string]$existing.current_ref) -CheckoutDir ([string]$existing.checkout_dir)
             $script:ExplicitSourceRef = $true
         } else {
-            Fail "source switch 需要通过 -Ref 指定目标分支、标签或提交。"
+            Fail "source switch requires -Ref to specify branch/tag/commit."
         }
     }
-    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "切换 ref 并同步源码"
+    Invoke-SourceBuild -ProfileName $profileName -ActivationMode "no" -ActionLabel "Switch ref and sync source"
 }
 
 function Invoke-SourceStatus {
-    Write-Host "源码模式状态:"
+    Write-Host "Source mode status:"
     $profiles = Get-SourceProfiles
     if ($profiles.Count -eq 0) {
-        Write-Host "  未安装任何源码条目"
+        Write-Host "  No source profiles installed"
         return
     }
 
@@ -3735,51 +3812,51 @@ function Invoke-SourceStatus {
     if (-not [string]::IsNullOrWhiteSpace($selectedProfileName)) {
         $profile = Get-SourceProfile -ProfileName $selectedProfileName
         if (-not $profile) {
-            Fail "未找到源码条目: $selectedProfileName"
+            Fail "Source profile not found: $selectedProfileName"
         }
-        Write-Host "  名称: $selectedProfileName"
-        Write-Host "  仓库: $([string]$profile.repo_input)"
-        Write-Host "  远端: $([string]$profile.remote_url)"
-        Write-Host "  目录: $([string]$profile.checkout_dir)"
+        Write-Host "  Name: $selectedProfileName"
+        Write-Host "  Repo: $([string]$profile.repo_input)"
+        Write-Host "  Remote: $([string]$profile.remote_url)"
+        Write-Host "  Checkout: $([string]$profile.checkout_dir)"
         Write-Host "  Ref: $([string]$profile.current_ref) ($([string]$profile.ref_kind))"
-        Write-Host "  工作区: $([string]$profile.build_workspace_root)"
-        Write-Host "  安装时间: $([string]$profile.installed_at)"
-        Write-Host "  最近同步: $([string]$profile.last_synced_at)"
-        Write-Host "  模式: 仅管理源码 checkout 与工具链，不生成源码命令入口"
+        Write-Host "  Workspace: $([string]$profile.build_workspace_root)"
+        Write-Host "  Installed at: $([string]$profile.installed_at)"
+        Write-Host "  Last synced: $([string]$profile.last_synced_at)"
+        Write-Host "  Mode: manage checkout and toolchain only; no source command wrappers generated"
         return
     }
 
     foreach ($profileName in $profiles.Keys) {
         $profile = $profiles[$profileName]
-        Write-Host ("  - {0} | {1} | {2} | {3} | 仅源码管理" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref, [string]$profile.checkout_dir)
+        Write-Host ("  - {0} | {1} | {2} | {3} | source-only management" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref, [string]$profile.checkout_dir)
     }
 }
 
 function Invoke-SourceList {
-    Write-Host "源码条目列表:"
+    Write-Host "Source profiles:"
     $profiles = Get-SourceProfiles
     if ($profiles.Count -eq 0) {
-        Write-Host "  当前没有已记录的源码条目"
+        Write-Host "  No source profiles recorded"
         return
     }
     foreach ($profileName in $profiles.Keys) {
         $profile = $profiles[$profileName]
-        Write-Host ("  - {0} | {1} | {2} | {3} | 仅源码管理" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref, [string]$profile.checkout_dir)
+        Write-Host ("  - {0} | {1} | {2} | {3} | source-only management" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref, [string]$profile.checkout_dir)
     }
 }
 
 function Invoke-SourceUninstall {
     if ($null -eq $script:State -or @((Get-SourceProfiles).Keys).Count -eq 0) {
-        Fail "未检测到源码条目。"
+        Fail "No source profiles found."
     }
 
     $profileName = Resolve-SourceProfileName -RequireExisting $true
     $profile = Get-SourceProfile -ProfileName $profileName
     if ($null -eq $profile) {
-        Fail "未找到源码条目: $profileName"
+        Fail "Source profile not found: $profileName"
     }
-    if (-not (Confirm-SourcePlan -ActionLabel "卸载源码条目" -ProfileName $profileName -RepoInput ([string]$profile.repo_input) -CheckoutDir ([string]$profile.checkout_dir) -RefName ([string]$profile.current_ref) -Hint "将删除源码条目记录；可选删除 checkout。" -CheckoutMode "删除现有条目资源" -CurrentRef ([string]$profile.current_ref) -CurrentCheckout ([string]$profile.checkout_dir))) {
-        Write-Info "已取消。"
+    if (-not (Confirm-SourcePlan -ActionLabel "Uninstall source profile" -ProfileName $profileName -RepoInput ([string]$profile.repo_input) -CheckoutDir ([string]$profile.checkout_dir) -RefName ([string]$profile.current_ref) -Hint "This will remove the source profile record; optionally delete the checkout." -CheckoutMode "Remove existing profile assets" -CurrentRef ([string]$profile.current_ref) -CurrentCheckout ([string]$profile.checkout_dir))) {
+        Write-Info "Canceled."
         return
     }
 
@@ -3787,7 +3864,7 @@ function Invoke-SourceUninstall {
         "remove" { $true }
         "keep" { $false }
         default {
-            if ($Yes) { $false } else { Confirm-YesNo -Prompt "是否同时删除源码目录 $([string]$profile.checkout_dir) ？" -DefaultYes $false }
+            if ($Yes) { $false } else { Confirm-YesNo -Prompt "Also delete checkout directory $([string]$profile.checkout_dir) ?" -DefaultYes $false }
         }
     }
     if ($removeCheckout -and -not [string]::IsNullOrWhiteSpace([string]$profile.checkout_dir)) {
@@ -3820,13 +3897,13 @@ function Invoke-SourceUninstall {
         Remove-Item -LiteralPath $script:StateRoot -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Host "已卸载源码条目: $profileName"
-    Show-SourceResultSummary -ActionLabel "卸载源码条目" -ProfileName $profileName -RefName $oldRef -CheckoutDir $oldCheckout
+    Write-Host "Source profile uninstalled: $profileName"
+    Show-SourceResultSummary -ActionLabel "Uninstall source profile" -ProfileName $profileName -RefName $oldRef -CheckoutDir $oldCheckout
 }
 
 function Pause-SourceMenu {
     if ([Environment]::UserInteractive) {
-        [void](Read-Host "按回车继续")
+        [void](Read-Host "Press Enter to continue")
     }
 }
 
@@ -3834,72 +3911,72 @@ function Show-SourceMenu {
     while ($true) {
         Clear-Host
         $profileCount = @((Get-SourceProfiles).Keys).Count
-        Write-Host "源码下载 / 管理"
+        Write-Host "Source download / management"
         Write-Host ""
-        Write-Host "规则: hodex 固定指向 release；源码模式只管理 checkout 和工具链。"
-        Write-Host "当前状态: 已记录源码条目 $profileCount 个"
+        Write-Host "Rule: hodex always points to release; source mode only manages checkout and toolchain."
+        Write-Host "Current: $profileCount source profiles recorded"
         Write-Host ""
-        Write-Host "  [源码同步]"
-        Write-Host "  1. 下载源码并准备工具链             下载或复用 checkout，并检查开发工具链"
-        Write-Host "  2. 更新源码                         拉取当前源码条目对应 ref 的最新代码"
-        Write-Host "  3. 切换分支 / 标签 / 提交并同步      切到新的 ref 后同步源码"
+        Write-Host "  [Sync]"
+        Write-Host "  1. Download source and prepare toolchain         Download or reuse checkout and check dev toolchain"
+        Write-Host "  2. Update source                                 Fetch latest code for current profile ref"
+        Write-Host "  3. Switch branch / tag / commit and sync         Switch to new ref then sync source"
         Write-Host ""
-        Write-Host "  [查看与清理]"
-        Write-Host "  5. 查看源码状态                     查看单个或全部源码条目"
-        Write-Host "  6. 卸载源码条目                     删除条目记录，可选删 checkout"
-        Write-Host "  7. 列出源码条目                     快速查看所有源码条目摘要"
-        Write-Host "  q. 返回版本列表"
+        Write-Host "  [View / Clean up]"
+        Write-Host "  5. View source status                     Show one or all source profiles"
+        Write-Host "  6. Uninstall source profile               Remove profile record; optionally delete checkout"
+        Write-Host "  7. List source profiles                   Quick summary of all source profiles"
+        Write-Host "  q. Back to version list"
         Write-Host ""
 
-        $choice = Read-Host "请选择操作（输入编号后回车）"
+        $choice = Read-Host "Choose an action (enter number)"
         $actionLabel = ""
         $actionHint = ""
         $action = $null
         switch ($choice) {
             "1" {
-                $actionLabel = "下载源码并准备工具链"
-                $actionHint = "接下来会确认仓库、checkout 目录、工具链和源码记录名。"
+                $actionLabel = "Download source and prepare toolchain"
+                $actionHint = "Next: confirm repo, checkout dir, toolchain, and source profile name."
                 $action = { Invoke-SourceInstall }
             }
             "2" {
-                $actionLabel = "更新源码"
-                $actionHint = "将拉取当前源码条目的最新代码并同步 checkout。"
+                $actionLabel = "Update source"
+                $actionHint = "Will fetch latest code for the current profile and sync checkout."
                 $action = { Invoke-SourceUpdate }
             }
             "3" {
-                $actionLabel = "切换 ref 并同步源码"
-                $actionHint = "接下来需要指定新的 branch / tag / commit。"
+                $actionLabel = "Switch ref and sync source"
+                $actionHint = "Next: specify a new branch / tag / commit."
                 $action = { Invoke-SourceSwitch }
             }
             "5" {
-                $actionLabel = "查看源码状态"
-                $actionHint = "将展示源码条目的详细状态信息。"
+                $actionLabel = "View source status"
+                $actionHint = "Will show detailed status for source profiles."
                 $action = { Invoke-SourceStatus }
             }
             "6" {
-                $actionLabel = "卸载源码条目"
-                $actionHint = "将删除选中条目的记录；可选删除源码目录。"
+                $actionLabel = "Uninstall source profile"
+                $actionHint = "Will remove the selected profile record; optionally delete the checkout."
                 $action = { Invoke-SourceUninstall }
             }
             "7" {
-                $actionLabel = "列出源码条目"
-                $actionHint = "将展示当前所有源码条目摘要。"
+                $actionLabel = "List source profiles"
+                $actionHint = "Will show a summary for all source profiles."
                 $action = { Invoke-SourceList }
             }
             "q" { return }
             "Q" { return }
             default {
-                Write-WarnLine "请输入 1、2、3、5、6、7 或 q。"
+                Write-WarnLine "Please enter 1, 2, 3, 5, 6, 7, or q."
                 Pause-SourceMenu
                 continue
             }
         }
 
         Clear-Host
-        Write-Host "源码下载 / 管理"
+        Write-Host "Source download / management"
         Write-Host ""
-        Write-Host "正在进入: $actionLabel"
-        Write-Host "提示: $actionHint"
+        Write-Host "Entering: $actionLabel"
+        Write-Host "Hint: $actionHint"
         Write-Host ""
         Show-SourceMenuActionPreview -Choice $choice
         Write-Host ""
@@ -3907,11 +3984,11 @@ function Show-SourceMenu {
         try {
             & $action
             Write-Host ""
-            Write-Host "操作完成: $actionLabel"
+            Write-Host "Completed: $actionLabel"
         } catch {
             Write-Host ""
-            Write-WarnLine "操作失败: $actionLabel"
-            Write-WarnLine ("失败分类: " + (Get-SourceErrorCategory -Message $_.Exception.Message))
+            Write-WarnLine "Failed: $actionLabel"
+            Write-WarnLine ("Failure category: " + (Get-SourceErrorCategory -Message $_.Exception.Message))
             Write-WarnLine $_.Exception.Message
         }
         Pause-SourceMenu
@@ -3921,7 +3998,7 @@ function Show-SourceMenu {
 function Invoke-List {
     $items = @(Get-MatchingReleases)
     if ($items.Count -eq 0) {
-        Fail "当前平台没有可用的 release 资产。"
+        Fail "No release assets available for this platform."
     }
 
     $currentVersion = ""
@@ -3930,8 +4007,8 @@ function Invoke-List {
     }
 
     if (-not [Environment]::UserInteractive) {
-        Write-Host "当前平台可下载版本: $script:PlatformLabel"
-        Write-Host ("{0,3}. {1,-12} {2}" -f 0, "源码模式", "源码下载 / 管理")
+        Write-Host "Available versions for this platform: $script:PlatformLabel"
+        Write-Host ("{0,3}. {1,-12} {2}" -f 0, "Source mode", "Source download / management")
         for ($i = 0; $i -lt $items.Count; $i++) {
             $item = $items[$i]
             Write-Host ("{0,3}. {1,-12} {2} {3}" -f ($i + 1), [string]$item.version, [string]$item.published_at, [string]$item.asset.name)
@@ -3941,27 +4018,27 @@ function Invoke-List {
 
     while ($true) {
         Write-Host ""
-        Write-Host "可下载版本 ($script:PlatformLabel):"
-        Write-Host ("{0,3}. {1,-12} {2}" -f 0, "源码模式", "源码下载 / 管理")
+        Write-Host "Available versions ($script:PlatformLabel):"
+        Write-Host ("{0,3}. {1,-12} {2}" -f 0, "Source mode", "Source download / management")
         for ($i = 0; $i -lt $items.Count; $i++) {
             $item = $items[$i]
-            $marker = ""
-            if (-not [string]::IsNullOrWhiteSpace($currentVersion) -and [string]$item.version -eq $currentVersion) {
-                $marker = " [已安装]"
-            }
-            Write-Host ("{0,3}. {1,-12} {2} {3}{4}" -f ($i + 1), [string]$item.version, [string]$item.published_at, [string]$item.asset.name, $marker)
+        $marker = ""
+        if (-not [string]::IsNullOrWhiteSpace($currentVersion) -and [string]$item.version -eq $currentVersion) {
+                $marker = " [installed]"
         }
+        Write-Host ("{0,3}. {1,-12} {2} {3}{4}" -f ($i + 1), [string]$item.version, [string]$item.published_at, [string]$item.asset.name, $marker)
+    }
 
-        $choice = Read-Host "输入编号查看更新日志，输入 0 进入源码模式管理，直接回车退出"
-        if ([string]::IsNullOrWhiteSpace($choice)) {
-            return
-        }
+        $choice = Read-Host "Enter number to view changelog, 0 for source mode, or press Enter to exit"
+    if ([string]::IsNullOrWhiteSpace($choice)) {
+        return
+    }
 
-        $index = 0
-        if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -gt $items.Count) {
-            Write-WarnLine "请输入有效编号。"
-            continue
-        }
+    $index = 0
+    if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -gt $items.Count) {
+            Write-WarnLine "Please enter a valid number."
+        continue
+    }
         if ($index -eq 0) {
             Show-SourceMenu
             continue
@@ -3973,9 +4050,9 @@ function Invoke-List {
 
         while ($true) {
             Write-Host ""
-            Write-Host " AI总结 " -ForegroundColor Black -BackgroundColor Yellow -NoNewline
-            Write-Host " 输入 a 调用 hodex/codex 对当前 changelog 做 AI 总结"
-            $action = Read-Host "操作: [a]AI总结（hodex/codex） [i]安装 [d]下载到 $script:DownloadRoot [b]返回列表 [q]退出"
+            Write-Host " AI summary " -ForegroundColor Black -BackgroundColor Yellow -NoNewline
+            Write-Host " Press a to run hodex/codex for an AI changelog summary"
+            $action = Read-Host "Action: [a]AI summary (hodex/codex) [i]Install [d]Download to $script:DownloadRoot [b]Back [q]Quit"
             $normalizedAction = if ($null -eq $action) { "" } else { $action.ToLowerInvariant() }
             switch ($normalizedAction) {
                 "a" {
@@ -3989,7 +4066,7 @@ function Invoke-List {
                     Write-Host (Get-ReleaseDetailsText -ReleaseInfo $selected)
                 }
                 "i" {
-                    Invoke-InstallLike -RequestedVersion ([string]$selected.release_tag) -ActionLabel "安装"
+                    Invoke-InstallLike -RequestedVersion ([string]$selected.release_tag) -ActionLabel "Install"
                     return
                 }
                 "d" {
@@ -3999,7 +4076,7 @@ function Invoke-List {
                 "b" { break }
                 "" { break }
                 "q" { return }
-                default { Write-WarnLine "请输入 a、i、d、b 或 q。" }
+                default { Write-WarnLine "Please enter a, i, d, b, or q." }
             }
         }
     }
@@ -4023,9 +4100,9 @@ function Invoke-InstallLike {
     $resolvedVersion = Normalize-Version $(if ([string]::IsNullOrWhiteSpace($releaseTag)) { $releaseName } else { $releaseTag })
 
     Write-Step "$ActionLabel Hodex"
-    Write-Step "检测到平台: $script:PlatformLabel"
-    Write-Step "命中 release: $(if ([string]::IsNullOrWhiteSpace($releaseName)) { "<unknown>" } else { $releaseName }) ($(if ([string]::IsNullOrWhiteSpace($releaseTag)) { "<unknown>" } else { $releaseTag }))"
-    Write-Step "下载资产: $([string]$asset.name)"
+    Write-Step "Detected platform: $script:PlatformLabel"
+    Write-Step "Selected release: $(if ([string]::IsNullOrWhiteSpace($releaseName)) { "<unknown>" } else { $releaseName }) ($(if ([string]::IsNullOrWhiteSpace($releaseTag)) { "<unknown>" } else { $releaseTag }))"
+    Write-Step "Download asset: $([string]$asset.name)"
 
     Select-CommandDir
 
@@ -4035,8 +4112,8 @@ function Invoke-InstallLike {
     Ensure-DirWritable $binaryDir
     Ensure-DirWritable (Split-Path -Parent $controllerPath)
 
-    Write-Step "安装目标二进制: $binaryPath"
-    Write-Step "命令目录: $script:CurrentCommandDir"
+    Write-Step "Install target binary: $binaryPath"
+    Write-Step "Command dir: $script:CurrentCommandDir"
 
     Install-BinaryFromAsset -Asset $asset -BinaryPath $binaryPath
     Sync-ControllerCopy -TargetPath $controllerPath
@@ -4079,40 +4156,152 @@ function Invoke-InstallLike {
     $script:State.node_setup_choice = $script:NodeSetupChoice
     Persist-StateRuntimeMetadata
 
-    Write-Step "安装完成: $binaryPath"
+    Write-Step "Install complete: $binaryPath"
     & $binaryPath --version
 
     switch ($script:PathUpdateMode) {
         "added" {
-            Write-Info "已写入用户 PATH。"
+            Write-Info "User PATH updated."
         }
         "configured" {
-            Write-Info "已刷新用户 PATH。"
+            Write-Info "User PATH refreshed."
         }
         "already" {
-            Write-Info "命令目录已在 PATH 中: $script:CurrentCommandDir"
+            Write-Info "Command dir already in PATH: $script:CurrentCommandDir"
         }
         "disabled" {
-            Write-WarnLine "命令目录未自动写入 PATH，请手动加入: $script:CurrentCommandDir"
+            Write-WarnLine "Command dir not added to PATH; add manually: $script:CurrentCommandDir"
         }
         "user-skipped" {
-            Write-WarnLine "命令目录未自动写入 PATH，请手动加入: $script:CurrentCommandDir"
+            Write-WarnLine "Command dir not added to PATH; add manually: $script:CurrentCommandDir"
         }
     }
 
-    Write-Info "下一步: 运行 'hodex --version' 验证安装"
-    Write-Info "管理命令: 'hodexctl status' / 'hodexctl list'"
+    Write-Info "Next: run 'hodex --version' to verify the install"
+    Write-Info "Management: 'hodexctl status' / 'hodexctl list'"
+}
+
+function Invoke-ManagerInstall {
+    $existingState = $script:State
+    $stateLoaded = $null -ne $existingState
+
+    Write-Step "Install hodexctl manager"
+    Select-CommandDir
+
+    $controllerPath = Join-Path $script:StateRoot "libexec\hodexctl.ps1"
+    Ensure-DirWritable (Split-Path -Parent $controllerPath)
+    Sync-ControllerCopy -TargetPath $controllerPath
+    if ($stateLoaded) {
+        Remove-OldWrappersIfNeeded -NewCommandDir $script:CurrentCommandDir
+    }
+
+    $installedVersion = ""
+    $releaseTag = ""
+    $releaseName = ""
+    $assetName = ""
+    $binaryPath = ""
+    $nodeChoice = ""
+    $installedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    if ($stateLoaded) {
+        $installedVersion = [string]$existingState.installed_version
+        $releaseTag = [string]$existingState.release_tag
+        $releaseName = [string]$existingState.release_name
+        $assetName = [string]$existingState.asset_name
+        $binaryPath = [string]$existingState.binary_path
+        $nodeChoice = [string]$existingState.node_setup_choice
+        if (-not [string]::IsNullOrWhiteSpace([string]$existingState.installed_at)) {
+            $installedAt = [string]$existingState.installed_at
+        }
+    }
+
+    Write-State `
+        -InstalledVersion $installedVersion `
+        -ReleaseTag $releaseTag `
+        -ReleaseName $releaseName `
+        -AssetName $assetName `
+        -BinaryPath $binaryPath `
+        -ControllerPath $controllerPath `
+        -CurrentCommandDir $script:CurrentCommandDir `
+        -WrappersCreated @(
+            (Join-Path $script:CurrentCommandDir "hodex.cmd"),
+            (Join-Path $script:CurrentCommandDir "hodex.ps1"),
+            (Join-Path $script:CurrentCommandDir "hodexctl.cmd"),
+            (Join-Path $script:CurrentCommandDir "hodexctl.ps1")
+        ) `
+        -CurrentPathUpdateMode $script:PathUpdateMode `
+        -CurrentPathProfile $script:PathProfile `
+        -CurrentNodeSetupChoice $nodeChoice `
+        -InstalledAt $installedAt
+
+    Sync-RuntimeWrappersFromState -CommandDir $script:CurrentCommandDir -ControllerPath $controllerPath
+    Update-PathIfNeeded
+    Persist-StateRuntimeMetadata
+
+    Write-Step "hodexctl installed: $(Join-Path $script:CurrentCommandDir 'hodexctl.cmd')"
+    Write-Info "State dir: $script:StateRoot"
+    Write-Info "Command dir: $script:CurrentCommandDir"
+    Write-Info "Only the manager is installed; run: hodexctl install"
+    switch ($script:PathUpdateMode) {
+        "added" {
+            Write-Info "User PATH updated."
+            Write-Info "If PowerShell still does not see hodexctl, reopen it."
+        }
+        "configured" {
+            Write-Info "User PATH refreshed."
+            Write-Info "If PowerShell still does not see hodexctl, reopen it."
+        }
+        "already" {
+            Write-Info "Command dir already in PATH: $script:CurrentCommandDir"
+        }
+        "disabled" {
+            Write-WarnLine "Command dir not added to PATH; add manually: $script:CurrentCommandDir"
+        }
+        "user-skipped" {
+            Write-WarnLine "Command dir not added to PATH; add manually: $script:CurrentCommandDir"
+        }
+    }
+    Write-Info "Next: run 'hodexctl' for help"
+    Write-Info "Install release: 'hodexctl install'"
+    Write-Info "List versions: 'hodexctl list'"
+    Write-Info "Download source and prepare toolchain: 'hodexctl source install -Repo stellarlinkco/codex -Ref main'"
 }
 
 function Invoke-Uninstall {
     if (-not $script:State) {
-        Fail "未检测到 hodex 安装状态，无需卸载。"
+        Fail "No hodex install state found; nothing to uninstall."
     }
     if ([string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
-        Fail "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+        if (@((Get-SourceProfiles).Keys).Count -gt 0) {
+            Fail "No release install found; to remove source profiles use: hodexctl source uninstall."
+        }
+
+        Write-Step "Uninstall hodexctl manager"
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir)) {
+            Remove-PathIfNeeded -CurrentCommandDir ([string]$script:State.command_dir) -CurrentPathUpdateMode ([string]$script:State.path_update_mode)
+        }
+        foreach ($wrapperPath in @(
+            (Join-Path ([string]$script:State.command_dir) "hodexctl.cmd"),
+            (Join-Path ([string]$script:State.command_dir) "hodexctl.ps1")
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($wrapperPath)) {
+                Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-Item -LiteralPath (Get-StateFilePath) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ([string]$script:State.controller_path) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "list-ui-state.json") -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "libexec") -Force -Recurse -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir)) {
+            Remove-Item -LiteralPath ([string]$script:State.command_dir) -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "bin") -Force -Recurse -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:StateRoot -Force -ErrorAction SilentlyContinue
+        Write-Info "hodexctl manager uninstalled."
+        return
     }
 
-    Write-Step "卸载正式版 Hodex"
+    Write-Step "Uninstall Hodex release"
 
     if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
         Remove-Item -LiteralPath ([string]$script:State.binary_path) -Force -ErrorAction SilentlyContinue
@@ -4140,83 +4329,124 @@ function Invoke-Uninstall {
         Remove-Item -LiteralPath (Join-Path $script:StateRoot "libexec") -Force -Recurse -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $script:StateRoot "bin") -Force -Recurse -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:StateRoot -Force -ErrorAction SilentlyContinue
-        Write-Info "已删除正式版二进制、包装器和安装状态。"
+        Write-Info "Removed release binary, wrappers, and install state."
     } else {
-        Write-Info "已删除正式版二进制；源码条目与管理脚本已保留。"
+        Write-Info "Removed release binary; source profiles and manager script kept."
     }
 }
 
 function Invoke-Status {
-    Write-Host "平台: $script:PlatformLabel"
-    Write-Host "状态目录: $script:StateRoot"
+    $repairNeeded = $false
+    Write-Output "Platform: $script:PlatformLabel"
+    Write-Output "State dir: $script:StateRoot"
 
     if ($script:State) {
         if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
-            Write-Host "正式版安装状态: 已安装"
-            Write-Host "版本: $([string]$script:State.installed_version)"
-            Write-Host "Release: $([string]$script:State.release_name) ($([string]$script:State.release_tag))"
-            Write-Host "资产: $([string]$script:State.asset_name)"
-            Write-Host "二进制: $([string]$script:State.binary_path)"
+            Write-Output "Release install status: installed"
+            Write-Output "Version: $([string]$script:State.installed_version)"
+            Write-Output "Release: $([string]$script:State.release_name) ($([string]$script:State.release_tag))"
+            Write-Output "Asset: $([string]$script:State.asset_name)"
+            Write-Output "Binary: $([string]$script:State.binary_path)"
             if ($env:OS -eq "Windows_NT") {
                 $helpersComplete = Test-ReleaseHelpersComplete -BinaryPath ([string]$script:State.binary_path)
-                Write-Host ("Windows 运行组件: " + $(if ($helpersComplete) { "完整" } else { "缺失" }))
+                Write-Output ("Windows runtime components: " + $(if ($helpersComplete) { "complete" } else { "missing" }))
                 foreach ($helperPath in @(Get-ReleaseHelperPaths -BinaryPath ([string]$script:State.binary_path))) {
                     $helperName = Split-Path -Leaf $helperPath
-                    Write-Host ("  - {0}: {1}" -f $helperName, $(if (Test-Path -LiteralPath $helperPath) { "已安装" } else { "缺失" }))
+                    Write-Output ("  - {0}: {1}" -f $helperName, $(if (Test-Path -LiteralPath $helperPath) { "installed" } else { "missing" }))
                 }
                 if (-not $helpersComplete) {
-                    Write-WarnLine "当前 Windows 安装不完整，请重新执行 hodexctl install 或 hodexctl upgrade。"
+                    Write-WarnLine "Current Windows install is incomplete; run hodexctl install or hodexctl upgrade."
                 }
             }
         } else {
-            Write-Host "正式版安装状态: 未安装"
+            Write-Output "Release install status: not installed"
+            if (-not [string]::IsNullOrWhiteSpace([string]$script:State.controller_path) -and (Test-Path -LiteralPath ([string]$script:State.controller_path))) {
+                Write-Output "Manager status: installed"
+                Write-Output "Hint: run hodexctl install to install release"
+            }
         }
-        Write-Host "命令目录: $([string]$script:State.command_dir)"
-        Write-Host "管理脚本副本: $([string]$script:State.controller_path)"
-        Write-Host "PATH 处理: $([string]$script:State.path_update_mode)"
+        Write-Output "Command dir: $([string]$script:State.command_dir)"
+        Write-Output "Manager script copy: $([string]$script:State.controller_path)"
+        Write-Output "PATH update mode: $([string]$script:State.path_update_mode)"
+        Write-Output ("PATH managed by hodexctl: " + $(if ($script:State.path_managed_by_hodexctl) { "true" } else { "false" }))
+        Write-Output "PATH source: $([string]$script:State.path_detected_source)"
         if (-not [string]::IsNullOrWhiteSpace([string]$script:State.path_profile)) {
-            Write-Host "PATH 作用域: $([string]$script:State.path_profile)"
+            Write-Output "PATH scope: $([string]$script:State.path_profile)"
         }
-        Write-Host "Node 处理选择: $([string]$script:State.node_setup_choice)"
-        Write-Host "安装时间: $([string]$script:State.installed_at)"
-        Write-Host "hodex 包装器: $(Join-Path ([string]$script:State.command_dir) 'hodex.cmd')"
-        Write-Host "hodexctl 包装器: $(Join-Path ([string]$script:State.command_dir) 'hodexctl.cmd')"
-        Write-Host "受管 hodex 指向: $(Get-ActiveHodexAlias)"
-        Write-Host "源码条目数量: $(@((Get-SourceProfiles).Keys).Count)"
+        Write-Output "Node setup choice: $([string]$script:State.node_setup_choice)"
+        Write-Output "Installed at: $([string]$script:State.installed_at)"
+        $hodexWrapper = Join-Path ([string]$script:State.command_dir) 'hodex.cmd'
+        $hodexctlWrapper = Join-Path ([string]$script:State.command_dir) 'hodexctl.cmd'
+        if (Test-Path -LiteralPath $hodexWrapper) {
+            Write-Output "hodex wrapper: $hodexWrapper"
+        }
+        if (Test-Path -LiteralPath $hodexctlWrapper) {
+            Write-Output "hodexctl wrapper: $hodexctlWrapper"
+        }
+        Write-Output "Managed hodex target: $(Get-ActiveHodexAlias)"
+        Write-Output "Source profiles: $(@((Get-SourceProfiles).Keys).Count)"
         foreach ($profileName in ((Get-SourceProfiles).Keys)) {
             $profile = Get-SourceProfile -ProfileName $profileName
-            Write-Host ("源码条目: {0} | {1} | {2} | 仅源码管理" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref)
+            Write-Output ("Source profile: {0} | {1} | {2} | source-only management" -f $profileName, [string]$profile.repo_input, [string]$profile.current_ref)
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.controller_path) -and -not (Test-Path -LiteralPath ([string]$script:State.controller_path))) {
+            Write-Output "Diagnostics: manager script copy missing"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir) -and -not (Test-Path -LiteralPath (Join-Path ([string]$script:State.command_dir) "hodexctl.cmd"))) {
+            Write-Output "Diagnostics: hodexctl wrapper missing"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and -not (Test-Path -LiteralPath ([string]$script:State.binary_path))) {
+            Write-Output "Diagnostics: hodex release binary missing"
+            $repairNeeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and (Test-Path -LiteralPath ([string]$script:State.binary_path)) -and -not (Test-Path -LiteralPath (Join-Path ([string]$script:State.command_dir) "hodex.cmd"))) {
+            Write-Output "Diagnostics: hodex wrapper missing"
+            $repairNeeded = $true
+        }
+        if ([string]$script:State.path_detected_source -eq "current-process-only") {
+            Write-Output "Diagnostics: PATH is only visible in this session; new terminals may not work"
+            $repairNeeded = $true
         }
     } else {
-        Write-Host "正式版安装状态: 未安装"
-        Write-Host "源码条目数量: 0"
+        Write-Output "Release install status: not installed"
+        Write-Output "Source profiles: 0"
     }
 
     $hodexCmd = Get-Command hodex -ErrorAction SilentlyContinue
     if ($hodexCmd) {
-        Write-Host "PATH 中的 hodex: $($hodexCmd.Source)"
+        Write-Output "hodex in PATH: $($hodexCmd.Source)"
     } else {
-        Write-Host "PATH 中的 hodex: 未找到"
+        Write-Output "hodex in PATH: not found"
+        if ($script:State -and -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
+            $repairNeeded = $true
+        }
     }
 
     $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
     if ($codexCmd) {
-        Write-Host "PATH 中的 codex: $($codexCmd.Source)"
+        Write-Output "codex in PATH: $($codexCmd.Source)"
     } else {
-        Write-Host "PATH 中的 codex: 未找到"
+        Write-Output "codex in PATH: not found"
     }
 
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
     if ($nodeCmd) {
-        Write-Host "Node.js: $(& $nodeCmd.Source -v)"
+        Write-Output "Node.js: $(& $nodeCmd.Source -v)"
     } else {
-        Write-Host "Node.js: 未安装"
+        Write-Output "Node.js: not installed"
+    }
+
+    if ($repairNeeded) {
+        Write-Output "Recommended: run hodexctl repair"
     }
 }
 
 function Invoke-Relink {
     if (-not $script:State) {
-        Fail "未检测到 hodex 安装状态，无法重建链接。"
+        Fail "No hodex install state found; cannot relink."
     }
 
     if (-not $script:ExplicitCommandDir) {
@@ -4250,7 +4480,25 @@ function Invoke-Relink {
     Sync-RuntimeWrappersFromState -CommandDir $script:CurrentCommandDir -ControllerPath ([string]$script:State.controller_path)
     Update-PathIfNeeded
     Persist-StateRuntimeMetadata
-    Write-Info "已重建正式版与管理脚本包装器到: $script:CurrentCommandDir"
+    Write-Info "Rebuilt release and manager wrappers in: $script:CurrentCommandDir"
+}
+
+function Invoke-Repair {
+    if (-not $script:State) {
+        Fail "No hodex install state found; cannot repair."
+    }
+
+    Write-Step "Repair hodexctl local state"
+    Invoke-Relink
+
+    $script:State = Load-State
+    if ($script:State -and -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and -not (Test-Path -LiteralPath ([string]$script:State.binary_path))) {
+        Write-WarnLine "Release binary missing; manager script, wrappers, and PATH were repaired, but the binary cannot be restored offline."
+        Write-Info "Next: run 'hodexctl install' or 'hodexctl upgrade <version>' to restore the release."
+        return
+    }
+
+    Write-Info "Repair completed."
 }
 
 if (-not $env:HODEXCTL_SKIP_MAIN) {
@@ -4265,16 +4513,16 @@ if (-not $env:HODEXCTL_SKIP_MAIN) {
 
     switch ($script:RequestedCommand) {
         "install" {
-            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "安装"
+            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "Install"
         }
         "upgrade" {
-            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "升级"
+            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "Upgrade"
         }
         "download" {
             Invoke-Download -RequestedVersion $script:RequestedVersion
         }
         "downgrade" {
-            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "降级"
+            Invoke-InstallLike -RequestedVersion $script:RequestedVersion -ActionLabel "Downgrade"
         }
         "source" {
             switch ($script:SourceAction) {
@@ -4300,8 +4548,14 @@ if (-not $env:HODEXCTL_SKIP_MAIN) {
         "relink" {
             Invoke-Relink
         }
+        "repair" {
+            Invoke-Repair
+        }
+        "manager-install" {
+            Invoke-ManagerInstall
+        }
         default {
-            Fail "未知命令: $script:RequestedCommand"
+            Fail "Unknown command: $script:RequestedCommand"
         }
     }
 }
