@@ -406,7 +406,7 @@ jobs:
           test -f "${state_dir}/libexec/hodexctl.sh"
           test -x "${state_dir}/commands/hodexctl"
           unset HODEX_STATE_DIR HODEXCTL_REPO HODEX_CONTROLLER_URL_BASE
-          "${state_dir}/commands/hodexctl" status | grep -F "状态目录: ${state_dir}"
+          "${state_dir}/commands/hodexctl" status | grep -F "State dir: ${state_dir}"
 
       - name: Smoke test install-hodexctl.ps1 (local server)
         if: runner.os == 'Windows'
