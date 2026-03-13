@@ -2020,7 +2020,6 @@ function Generate-HodexctlCmdWrapper {
         [string]$StateDir
     )
 
-    $runner = Get-ControllerCommand
     $content = @"
 @echo off
 set "HODEX_DISPLAY_NAME=hodexctl"
@@ -2029,11 +2028,13 @@ if not exist "$ControllerPath" (
   echo hodexctl controller is missing; reinstall hodexctl. 1>&2
   exit /b 1
 )
+set "HODEXCTL_RUNNER=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+where pwsh >nul 2>nul && set "HODEXCTL_RUNNER=pwsh"
 if "%~1"=="" (
-  $runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" help
+  "%HODEXCTL_RUNNER%" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" help
   exit /b %ERRORLEVEL%
 )
-$runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" %*
+"%HODEXCTL_RUNNER%" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" %*
 "@
 
     Set-Content -LiteralPath $WrapperPath -Value $content -Encoding ASCII
@@ -2046,7 +2047,6 @@ function Generate-HodexctlPs1Wrapper {
         [string]$StateDir
     )
 
-    $runner = Get-ControllerCommand
     $content = @"
 `$ErrorActionPreference = "Stop"
 `$env:HODEX_DISPLAY_NAME = "hodexctl"
@@ -2054,6 +2054,22 @@ function Generate-HodexctlPs1Wrapper {
 if (-not (Test-Path -LiteralPath "$ControllerPath")) {
     Write-Error "hodexctl controller is missing; reinstall hodexctl."
     exit 1
+}
+`$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+if (`$pwsh -and -not [string]::IsNullOrWhiteSpace(`$pwsh.Source)) {
+    `$runner = `$pwsh.Source
+} else {
+    `$powershellFallback = Join-Path `$PSHOME "powershell.exe"
+    if (Test-Path -LiteralPath `$powershellFallback) {
+        `$runner = `$powershellFallback
+    } else {
+        `$powershell = Get-Command powershell -ErrorAction SilentlyContinue
+        if (`$powershell -and -not [string]::IsNullOrWhiteSpace(`$powershell.Source)) {
+            `$runner = `$powershell.Source
+        } else {
+            `$runner = "powershell"
+        }
+    }
 }
 `$forwardedArgs = @(`$args)
 `$hasStateDirOverride = `$false
@@ -2067,13 +2083,13 @@ foreach (`$arg in `$forwardedArgs) {
     }
 }
 if (`$forwardedArgs.Count -eq 0) {
-    & "$runner" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" help
+    & `$runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" help
     exit `$LASTEXITCODE
 }
 if (-not `$hasStateDirOverride) {
     `$forwardedArgs = @("-StateDir", "$StateDir") + `$forwardedArgs
 }
-& "$runner" -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" @forwardedArgs
+& `$runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" @forwardedArgs
 "@
 
     Set-Content -LiteralPath $WrapperPath -Value $content -Encoding UTF8

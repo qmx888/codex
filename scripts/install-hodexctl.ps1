@@ -105,7 +105,17 @@ try {
     $argumentList += @("-GitHubToken", $env:GITHUB_TOKEN)
   }
 
-  $runner = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+  $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+  if ($pwsh -and -not [string]::IsNullOrWhiteSpace($pwsh.Source)) {
+    $runner = $pwsh.Source
+  } else {
+    $powershellFallback = Join-Path $PSHOME "powershell.exe"
+    if (Test-Path -LiteralPath $powershellFallback) {
+      $runner = $powershellFallback
+    } else {
+      $runner = "powershell"
+    }
+  }
   Write-Host "==> Start hodexctl initial install"
   & $runner @argumentList
   if ($LASTEXITCODE -ne 0) {
@@ -116,14 +126,44 @@ try {
   if ($env:HODEXCTL_NO_PATH_UPDATE -eq "1") {
     Write-Host "==> PATH update skipped; you can run: $resolvedWrapperCmd status"
   } else {
+    $sessionPathAdjusted = $false
+
     if (-not (Get-Command hodexctl -ErrorAction SilentlyContinue)) {
       Refresh-SessionPathFromRegistry
     }
-    if (Get-Command hodexctl -ErrorAction SilentlyContinue) {
-      Write-Host "==> Current session PATH refreshed; you can run: hodexctl status"
+
+    $hodexctlCommand = Get-Command hodexctl -ErrorAction SilentlyContinue
+    $hodexctlCommandDir = if ($hodexctlCommand -and $hodexctlCommand.Source) { Split-Path -Parent $hodexctlCommand.Source } else { "" }
+    $resolvedCommandDirNormalized = $resolvedCommandDir.TrimEnd("\\")
+    $hodexctlIsExpected = -not [string]::IsNullOrWhiteSpace($hodexctlCommandDir) -and $hodexctlCommandDir.TrimEnd("\\") -ieq $resolvedCommandDirNormalized
+
+    if (-not $hodexctlIsExpected) {
+      $pathParts = @()
+      foreach ($part in ($env:Path -split ";")) {
+        if ([string]::IsNullOrWhiteSpace($part)) {
+          continue
+        }
+        if ($part.TrimEnd("\\") -ieq $resolvedCommandDirNormalized) {
+          continue
+        }
+        $pathParts += $part
+      }
+      $env:Path = ($resolvedCommandDirNormalized, $pathParts) -join ";"
+      $sessionPathAdjusted = $true
+
+      $hodexctlCommand = Get-Command hodexctl -ErrorAction SilentlyContinue
+      $hodexctlCommandDir = if ($hodexctlCommand -and $hodexctlCommand.Source) { Split-Path -Parent $hodexctlCommand.Source } else { "" }
+      $hodexctlIsExpected = -not [string]::IsNullOrWhiteSpace($hodexctlCommandDir) -and $hodexctlCommandDir.TrimEnd("\\") -ieq $resolvedCommandDirNormalized
+    }
+
+    if ($hodexctlIsExpected) {
+      if ($sessionPathAdjusted) {
+        Write-Host "==> Command dir added to current session PATH; you can run: hodexctl status"
+      } else {
+        Write-Host "==> Current session PATH refreshed; you can run: hodexctl status"
+      }
     } else {
-      $env:Path = "$resolvedCommandDir;$env:Path"
-      Write-Host "==> Command dir added to current session PATH; you can run: hodexctl status"
+      Write-Host "==> Command dir added to current session PATH; you can run: $resolvedWrapperCmd status"
     }
   }
 } catch {

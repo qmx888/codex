@@ -388,16 +388,16 @@ try {
         New-Item -ItemType Directory -Path $releaseStateDir -Force | Out-Null
         New-Item -ItemType Directory -Path $releaseCommandDir -Force | Out-Null
 
-        $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
-        if ($pwsh) {
-            $sourceExe = $pwsh.Source
-        } else {
-            $tar = Get-Command tar -ErrorAction SilentlyContinue
-            if ($tar -and $tar.CommandType -eq "Application" -and -not [string]::IsNullOrWhiteSpace($tar.Source)) {
-                $sourceExe = $tar.Source
-            } else {
-                $sourceExe = (Get-Command powershell).Source
+        $sourceExe = $null
+        foreach ($candidate in @("tar.exe", "curl.exe")) {
+            $command = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($command -and $command.CommandType -eq "Application" -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+                $sourceExe = $command.Source
+                break
             }
+        }
+        if ([string]::IsNullOrWhiteSpace($sourceExe)) {
+            throw "Missing tar.exe/curl.exe; cannot build smoke release assets."
         }
         Copy-Item $sourceExe (Join-Path $releaseDir "codex-x86_64-pc-windows-msvc.exe") -Force
         Copy-Item $sourceExe (Join-Path $releaseDir "codex-command-runner.exe") -Force
