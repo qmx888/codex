@@ -16,7 +16,7 @@
 - `codex serve` 负责：接收 GitHub webhook（`POST /github/webhook`）、拉取/缓存 GitHub 上下文、准备 worktree、运行 Codex（异步工作）、持久化状态，并提供 Web UI + Kanban 交互（拖拽、持久化位置、SSE 同步）。
 - `config.toml` 中配置 `[github_webhook]` 后，仅需启动一次 `codex serve` 即可启用 GitHub webhook + Kanban。
 
-目标是把“看板上的每张卡片 = GitHub work item”，让看板成为 GitHub 驱动的任务面板，而不是会话状态面板；`codex github` CLI 子命令在融合后不再提供。
+目标是把“看板上的每张卡片 = GitHub work item”，让看板成为 GitHub 驱动的任务面板，而不是会话状态面板；为兼容 userspace，`codex github` 保留为 `codex serve` 的别名入口。
 
 体验参考：`BloopAI/vibe-kanban` 的信息架构（看板 + 详情抽屉 + 执行日志/模型/提示词 per-task），但不照搬其“workspace / MCP”实现。
 

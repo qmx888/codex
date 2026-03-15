@@ -1,9 +1,12 @@
-# `codex serve` GitHub webhook 运行说明
+# `codex serve` GitHub webhook / Kanban 运行说明
+
+> 兼容性：`codex github` 仍保留为 `codex serve` 的子命令别名入口；本文以 `codex serve` 作为主语描述行为。
 
 当 `config.toml` 中启用 `[github_webhook] enabled = true` 时，`codex serve` 会在同一个进程/同一个端口上提供：
 
 - Web UI
 - `/api/*`
+- `/kanban`（GitHub Kanban 视图）
 - `POST /github/webhook`（GitHub webhook 入口）
 
 `POST /github/webhook` 不走 Web UI token 鉴权；只依赖 GitHub HMAC（`X-Hub-Signature-256`）+ allowlist + permission checks（与原 `codex github` 行为一致）。
@@ -76,7 +79,7 @@ push = true
 
 优先级是：CLI overrides（例如 `-c key=value`） > `config.toml` > 内置默认值。
 
-提示：GitHub Kanban 同步优先使用 `allow_repos` 作为同步目标；如果未配置，会尝试从启动 `codex serve` 的当前目录读取 `git remote origin` 推断一个 repo。
+提示：GitHub Kanban 同步优先使用 `CODEX_HOME/github-repos.json`；如果不存在或为空，会使用 `github_webhook.allow_repos`；如果两者都为空，会尝试从启动 `codex serve` 的当前目录读取 `git remote origin` 推断一个 repo。
 
 ## 环境变量
 
@@ -136,6 +139,10 @@ GitHub App 的 webhook URL 也指向同一个公网入口，例如：
 - push worktree：`~/.codex/github-repos/<owner>/<repo>/pushes/<hash>`
 - thread state：`~/.codex/github/threads/<owner>/<repo>/...`
 - delivery markers：`~/.codex/github/deliveries/*.marker`
+- Kanban 元数据：`~/.codex/github-kanban.json`
+- Kanban job 状态：`~/.codex/github-jobs.json`
+- Kanban work items 快照：`~/.codex/github-work-items.json`
+- Kanban repo 列表：`~/.codex/github-repos.json`
 
 `push` 事件按分支哈希复用 worktree；同一分支后续 push 会复用同一个工作目录。
 
